@@ -31,6 +31,7 @@ import androidx.media3.extractor.ExtractorInput;
 import androidx.media3.extractor.ExtractorOutput;
 import androidx.media3.extractor.ExtractorsFactory;
 import androidx.media3.extractor.PositionHolder;
+import androidx.media3.extractor.IndexSeekMap;
 import androidx.media3.extractor.SeekMap;
 import androidx.media3.extractor.ts.TsPayloadReader.TrackIdGenerator;
 import java.io.IOException;
@@ -66,6 +67,8 @@ public final class PsExtractor implements Extractor {
   private final SparseArray<PesReader> psPayloadReaders; // Indexed by pid
   private final ParsableByteArray psPacketBuffer;
   private final PsDurationReader durationReader;
+  @Nullable private final DvdPrivateStreamReader dvdPrivateStreamReader;
+  @Nullable private final IndexSeekMap injectedSeekMap;
 
   private boolean foundAllTracks;
   private boolean foundAudioTrack;
@@ -82,7 +85,17 @@ public final class PsExtractor implements Extractor {
   }
 
   public PsExtractor(TimestampAdjuster timestampAdjuster) {
+    this(timestampAdjuster, null);
+  }
+
+  public PsExtractor(TimestampAdjuster timestampAdjuster, @Nullable DvdPrivateStreamReader dvdPrivateStreamReader) {
+    this(timestampAdjuster, dvdPrivateStreamReader,  null);
+  }
+
+  public PsExtractor(TimestampAdjuster timestampAdjuster, @Nullable DvdPrivateStreamReader dvdPrivateStreamReader, @Nullable IndexSeekMap injectedSeekMap) {
     this.timestampAdjuster = timestampAdjuster;
+    this.dvdPrivateStreamReader = dvdPrivateStreamReader;
+    this.injectedSeekMap = injectedSeekMap;
     psPacketBuffer = new ParsableByteArray(4096);
     psPayloadReaders = new SparseArray<>();
     durationReader = new PsDurationReader();
@@ -178,7 +191,7 @@ public final class PsExtractor implements Extractor {
     checkNotNull(output);
 
     long inputLength = input.getLength();
-    boolean canReadDuration = inputLength != C.LENGTH_UNSET;
+    boolean canReadDuration = inputLength != C.LENGTH_UNSET && injectedSeekMap == null;
     if (canReadDuration && !durationReader.isDurationReadFinished()) {
       return durationReader.readDuration(input, seekPosition);
     }
@@ -242,10 +255,7 @@ public final class PsExtractor implements Extractor {
       if (payloadReader == null) {
         @Nullable ElementaryStreamReader elementaryStreamReader = null;
         if (streamId == PRIVATE_STREAM_1) {
-          // Private stream, used for AC3 audio.
-          // NOTE: This may need further parsing to determine if its DTS, but that's likely only
-          // valid for DVDs.
-          elementaryStreamReader = new Ac3Reader(MimeTypes.VIDEO_PS);
+          elementaryStreamReader = dvdPrivateStreamReader != null ? dvdPrivateStreamReader : new DvdPrivateStreamReader(null);
           foundAudioTrack = true;
           lastTrackPosition = input.getPosition();
         } else if ((streamId & AUDIO_STREAM_MASK) == AUDIO_STREAM) {
@@ -307,7 +317,9 @@ public final class PsExtractor implements Extractor {
   private void maybeOutputSeekMap(long inputLength) {
     if (!hasOutputSeekMap) {
       hasOutputSeekMap = true;
-      if (durationReader.getDurationUs() != C.TIME_UNSET) {
+      if (injectedSeekMap != null) {
+        output.seekMap(injectedSeekMap);
+      } else if (durationReader.getDurationUs() != C.TIME_UNSET) {
         psBinarySearchSeeker =
             new PsBinarySearchSeeker(
                 durationReader.getScrTimestampAdjuster(),
