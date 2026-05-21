@@ -16,3 +16,4 @@ lib-exoplayer-smoothstreaming-release.aar
 lib-extractor-release.aar
 lib-session-release.aar
 lib-ui-release.aar
+lib-ui-danmaku-release.aar

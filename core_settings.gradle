@@ -50,6 +50,8 @@ project(modulePrefix + 'lib-exoplayer-workmanager').projectDir = new File(rootDi
 
 include modulePrefix + 'lib-ui'
 project(modulePrefix + 'lib-ui').projectDir = new File(rootDir, 'libraries/ui')
+include modulePrefix + 'lib-ui-danmaku'
+project(modulePrefix + 'lib-ui-danmaku').projectDir = new File(rootDir, 'libraries/ui_danmaku')
 include modulePrefix + 'lib-ui-leanback'
 project(modulePrefix + 'lib-ui-leanback').projectDir = new File(rootDir, 'libraries/ui_leanback')
 include modulePrefix + 'lib-ui-compose'

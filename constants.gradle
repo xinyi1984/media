@@ -66,6 +66,7 @@ project.ext {
     lottieVersion = '6.6.0'
     truthVersion = '1.4.0'
     okhttpVersion = '4.12.0'
+    brotliVersion = '0.1.2'
     testParameterInjectorVersion = '1.18'
     modulePrefix = ':'
     if (gradle.ext.has('androidxMediaModulePrefix')) {

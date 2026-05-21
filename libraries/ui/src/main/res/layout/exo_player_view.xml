@@ -61,6 +61,10 @@
 
   </androidx.media3.ui.AspectRatioFrameLayout>
 
+  <androidx.media3.ui.danmaku.DanmakuView android:id="@id/exo_danmaku"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"/>
+
   <androidx.media3.ui.SubtitleView android:id="@id/exo_subtitles"
     android:layout_width="match_parent"
     android:layout_height="match_parent"/>

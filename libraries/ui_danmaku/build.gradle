@@ -1,4 +1,4 @@
-// Copyright (C) 2016 The Android Open Source Project
+// Copyright (C) 2026 The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,42 +14,29 @@
 apply plugin: 'com.android.library'
 apply from: "$gradle.ext.androidxMediaSettingsDir/common_config.gradle"
 
-android.buildTypes.debug.testCoverageEnabled true
-
 android {
-    namespace 'androidx.media3.ui'
-
-    lint {
-        baseline = file("lint-baseline.xml")
-    }
+    namespace 'androidx.media3.ui.danmaku'
 
     publishing {
         singleVariant('release') {
             withSourcesJar()
         }
     }
-
-    sourceSets {
-        androidTest.assets.srcDir '../test_data/src/test/assets'
-        test.assets.srcDir '../test_data/src/test/assets/'
-    }
 }
 
 dependencies {
     api project(modulePrefix + 'lib-common')
-    api project(modulePrefix + 'lib-ui-danmaku')
+    api project(modulePrefix + 'lib-datasource')
+    api project(modulePrefix + 'lib-datasource-okhttp')
+    api 'com.squareup.okhttp3:okhttp:' + okhttpVersion
+    implementation 'org.brotli:dec:' + brotliVersion
     implementation 'androidx.annotation:annotation:' + androidxAnnotationVersion
-    implementation 'androidx.recyclerview:recyclerview:' + androidxRecyclerViewVersion
     compileOnly 'org.checkerframework:checker-qual:' + checkerframeworkVersion
     compileOnly 'org.jetbrains.kotlin:kotlin-annotations-jvm:' + kotlinAnnotationsVersion
-    testImplementation project(modulePrefix + 'lib-exoplayer')
-    testImplementation project(modulePrefix + 'test-utils-robolectric')
-    testImplementation project(modulePrefix + 'test-utils')
-    testImplementation 'org.robolectric:robolectric:' + robolectricVersion
 }
 
 ext {
-    releaseArtifactId = 'media3-ui'
-    releaseName = 'Media3 UI module'
+    releaseArtifactId = 'media3-ui-danmaku'
+    releaseName = 'Media3 UI Danmaku module'
 }
 apply from: '../../publish.gradle'
