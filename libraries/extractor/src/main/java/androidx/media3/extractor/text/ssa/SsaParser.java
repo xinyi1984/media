@@ -44,6 +44,9 @@ import com.google.common.base.Ascii;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -298,6 +301,7 @@ public final class SsaParser implements SubtitleParser {
     @Nullable
     SsaDialogueFormat format = haveInitializationData ? dialogueFormatFromInitializationData : null;
     @Nullable String currentLine;
+    List<SsaDialogueInfo> dialogues = new ArrayList<>();
     while ((currentLine = data.readLine(charset)) != null) {
       if (currentLine.startsWith(FORMAT_LINE_PREFIX)) {
         format = SsaDialogueFormat.fromFormatLine(currentLine);
@@ -306,27 +310,23 @@ public final class SsaParser implements SubtitleParser {
           Log.w(TAG, "Skipping dialogue line before complete format: " + currentLine);
           continue;
         }
-        parseDialogueLine(currentLine, format, cues, cueTimesUs);
+        @Nullable SsaDialogueInfo dialogue = parseDialogueLine(currentLine, format);
+        if (dialogue != null) {
+          dialogues.add(dialogue);
+        }
       }
     }
+    processCues(dialogues, cues, cueTimesUs);
   }
 
-  /**
-   * Parses a dialogue line.
-   *
-   * @param dialogueLine The dialogue values (i.e. everything after {@code Dialogue:}).
-   * @param format The dialogue format to use when parsing {@code dialogueLine}.
-   * @param cues A list to which parsed cues will be added.
-   * @param cueTimesUs A sorted list to which parsed cue timestamps will be added.
-   */
-  private void parseDialogueLine(
-      String dialogueLine, SsaDialogueFormat format, List<List<Cue>> cues, List<Long> cueTimesUs) {
+  @Nullable
+  private SsaDialogueInfo parseDialogueLine(String dialogueLine, SsaDialogueFormat format) {
     checkArgument(dialogueLine.startsWith(DIALOGUE_LINE_PREFIX));
     String[] lineValues =
         dialogueLine.substring(DIALOGUE_LINE_PREFIX.length()).split(",", format.length);
     if (lineValues.length != format.length) {
       Log.w(TAG, "Skipping dialogue line with fewer columns than format: " + dialogueLine);
-      return;
+      return null;
     }
 
     int layer = 0;
@@ -341,29 +341,105 @@ public final class SsaParser implements SubtitleParser {
     long startTimeUs = parseTimecodeUs(lineValues[format.startTimeIndex]);
     if (startTimeUs == C.TIME_UNSET) {
       Log.w(TAG, "Skipping invalid timing: " + dialogueLine);
-      return;
+      return null;
     }
 
     long endTimeUs = parseTimecodeUs(lineValues[format.endTimeIndex]);
     if (endTimeUs == C.TIME_UNSET || endTimeUs <= startTimeUs) {
       Log.w(TAG, "Skipping invalid timing: " + dialogueLine);
-      return;
+      return null;
     }
 
-    @Nullable
-    SsaStyle style =
-        styles != null && format.styleIndex != C.INDEX_UNSET
-            ? styles.get(lineValues[format.styleIndex].trim())
-            : null;
+    String styleName = format.styleIndex != C.INDEX_UNSET ? lineValues[format.styleIndex].trim() : "";
     String rawText = lineValues[format.textIndex];
-    SsaStyle.Overrides styleOverrides = SsaStyle.Overrides.parseFromDialogue(rawText);
+
+    float dialogueMarginLeft = parseDialogueMargin(lineValues, format.marginLeftIndex);
+    float dialogueMarginRight = parseDialogueMargin(lineValues, format.marginRightIndex);
+    float dialogueMarginVertical = parseDialogueMargin(lineValues, format.marginVerticalIndex);
+
+    return new SsaDialogueInfo(startTimeUs, endTimeUs, layer, styleName, rawText, dialogueMarginLeft, dialogueMarginRight, dialogueMarginVertical);
+  }
+
+  private static float parseDialogueMargin(String[] lineValues, int index) {
+    return index != C.INDEX_UNSET ? SsaStyle.parseMargin(lineValues[index]) : 0f;
+  }
+
+  private void processCues(List<SsaDialogueInfo> dialogues, List<List<Cue>> cues, List<Long> cueTimesUs) {
+    Collections.sort(dialogues);
+    Map<Integer, Map<Long, Float>> stackingByAlignment = new HashMap<>();
+    for (SsaDialogueInfo dialogue : dialogues) {
+      @Nullable SsaStyle style = styles != null ? styles.get(dialogue.styleName) : null;
+      if (styles == null || style == null) {
+        @Nullable Cue cue = createCueFromDialogueInfo(dialogue, style, SsaStyle.Overrides.parseFromDialogue(dialogue.rawText), dialogue.marginVertical);
+        if (cue != null) {
+          addCueToTimeline(cue, dialogue.startTimeUs, dialogue.endTimeUs, cues, cueTimesUs);
+        }
+        continue;
+      }
+      float marginVertical = dialogue.marginVertical;
+      if (marginVertical == 0f && style.marginVertical != 0f && style.marginVertical != Cue.DIMEN_UNSET) {
+        marginVertical = style.marginVertical;
+      }
+      SsaStyle.Overrides styleOverrides = SsaStyle.Overrides.parseFromDialogue(dialogue.rawText);
+      @SsaStyle.SsaAlignment int effectiveAlignment = styleOverrides.alignment != SsaStyle.SSA_ALIGNMENT_UNKNOWN ? styleOverrides.alignment : style.alignment;
+      boolean isBottom = effectiveAlignment >= SsaStyle.SSA_ALIGNMENT_BOTTOM_LEFT && effectiveAlignment <= SsaStyle.SSA_ALIGNMENT_BOTTOM_RIGHT;
+      boolean isTop = effectiveAlignment >= SsaStyle.SSA_ALIGNMENT_TOP_LEFT && effectiveAlignment <= SsaStyle.SSA_ALIGNMENT_TOP_RIGHT;
+      if ((isBottom || isTop) && style.fontSize != Cue.DIMEN_UNSET) {
+        marginVertical = applyStacking(stackingByAlignment, dialogue, style, effectiveAlignment, marginVertical, styleOverrides.position != null);
+      }
+      @Nullable Cue cue = createCueFromDialogueInfo(dialogue, style, styleOverrides, marginVertical);
+      if (cue != null) {
+        addCueToTimeline(cue, dialogue.startTimeUs, dialogue.endTimeUs, cues, cueTimesUs);
+      }
+    }
+  }
+
+  private static float applyStacking(Map<Integer, Map<Long, Float>> stackingByAlignment, SsaDialogueInfo dialogue, SsaStyle style, @SsaStyle.SsaAlignment int effectiveAlignment, float marginVertical, boolean hasAbsolutePosition) {
+    Map<Long, Float> stack = stackingByAlignment.get(effectiveAlignment);
+    if (stack == null) {
+      stack = new HashMap<>();
+      stackingByAlignment.put(effectiveAlignment, stack);
+    }
+    Iterator<Map.Entry<Long, Float>> iterator = stack.entrySet().iterator();
+    while (iterator.hasNext()) {
+      if (iterator.next().getKey() <= dialogue.startTimeUs) iterator.remove();
+    }
+    if (hasAbsolutePosition) return marginVertical;
+    float currentMaxOccupied = 0f;
+    for (float height : stack.values()) {
+      currentMaxOccupied = Math.max(currentMaxOccupied, height);
+    }
+    float safetySpacing = style.fontSize * 0.28f;
+    if (currentMaxOccupied > 0 && currentMaxOccupied >= marginVertical) {
+      marginVertical = currentMaxOccupied + safetySpacing;
+    }
+    int lineCount = countTextLines(dialogue.rawText);
+    stack.put(dialogue.endTimeUs, marginVertical + style.fontSize * lineCount + safetySpacing * 0.2f);
+    return marginVertical;
+  }
+
+  @Nullable
+  private Cue createCueFromDialogueInfo(SsaDialogueInfo dialogue, @Nullable SsaStyle style, SsaStyle.Overrides styleOverrides, float marginVertical) {
+    String rawText = dialogue.rawText;
     String text =
         SsaStyle.Overrides.stripStyleOverrides(rawText)
             .replace("\\N", "\n")
             .replace("\\n", "\n")
             .replace("\\h", "\u00A0");
-    Cue cue = createCue(text, layer, style, styleOverrides, screenWidth, screenHeight);
+    if (text.startsWith("m ") || text.startsWith("M ")) return null;
+    return createCue(
+        text,
+        dialogue.layer,
+        style,
+        styleOverrides,
+        dialogue.marginLeft,
+        dialogue.marginRight,
+        marginVertical,
+        screenWidth,
+        screenHeight);
+  }
 
+  private static void addCueToTimeline(Cue cue, long startTimeUs, long endTimeUs, List<List<Cue>> cues, List<Long> cueTimesUs) {
     int startTimeIndex = addCuePlacerholderByTime(startTimeUs, cueTimesUs, cues);
     int endTimeIndex = addCuePlacerholderByTime(endTimeUs, cueTimesUs, cues);
     // Iterate on cues from startTimeIndex until endTimeIndex, adding the current cue.
@@ -396,6 +472,9 @@ public final class SsaParser implements SubtitleParser {
       int layer,
       @Nullable SsaStyle style,
       SsaStyle.Overrides styleOverrides,
+      float dialogueMarginLeft,
+      float dialogueMarginRight,
+      float dialogueMarginVertical,
       float screenWidth,
       float screenHeight) {
     SpannableString spannableText = new SpannableString(text);
@@ -467,15 +546,37 @@ public final class SsaParser implements SubtitleParser {
         .setPositionAnchor(toPositionAnchor(alignment))
         .setLineAnchor(toLineAnchor(alignment));
 
-    if (styleOverrides.position != null
-        && screenHeight != Cue.DIMEN_UNSET
-        && screenWidth != Cue.DIMEN_UNSET) {
+    if (styleOverrides.position != null && screenHeight != Cue.DIMEN_UNSET && screenWidth != Cue.DIMEN_UNSET) {
       cue.setPosition(styleOverrides.position.x / screenWidth);
       cue.setLine(styleOverrides.position.y / screenHeight, LINE_TYPE_FRACTION);
-    } else {
-      // TODO: Read the MarginL, MarginR and MarginV values from the Style & Dialogue lines.
-      cue.setPosition(computeDefaultLineOrPosition(cue.getPositionAnchor()));
-      cue.setLine(computeDefaultLineOrPosition(cue.getLineAnchor()), LINE_TYPE_FRACTION);
+    } else if (alignment != SsaStyle.SSA_ALIGNMENT_UNKNOWN) {
+      float position = computeDefaultLineOrPosition(cue.getPositionAnchor());
+      float line = computeDefaultLineOrPosition(cue.getLineAnchor());
+      float marginLeftPixels = resolveMargin(dialogueMarginLeft, style != null ? style.marginLeft : Cue.DIMEN_UNSET);
+      float marginRightPixels = resolveMargin(dialogueMarginRight, style != null ? style.marginRight : Cue.DIMEN_UNSET);
+      if (screenWidth != Cue.DIMEN_UNSET && screenWidth != 0f) {
+        float marginLeft = marginLeftPixels / screenWidth;
+        float marginRight = marginRightPixels / screenWidth;
+        if (alignment % 3 == 1) {
+          position += marginLeft;
+        } else if (alignment % 3 == 0) {
+          position -= marginRight;
+        } else {
+          position += (marginLeft - marginRight) / 2;
+        }
+        cue.setSize(1 - marginRight - marginLeft);
+      }
+      boolean isMiddleAlignment = alignment >= SsaStyle.SSA_ALIGNMENT_MIDDLE_LEFT && alignment <= SsaStyle.SSA_ALIGNMENT_MIDDLE_RIGHT;
+      if (!isMiddleAlignment) {
+        float marginVerticalPixels = resolveMargin(dialogueMarginVertical, style != null ? style.marginVertical : Cue.DIMEN_UNSET);
+        if (marginVerticalPixels != 0f && screenHeight != Cue.DIMEN_UNSET && screenHeight != 0f) {
+          float marginVertical = marginVerticalPixels / screenHeight;
+          boolean isTopAlignment = alignment >= SsaStyle.SSA_ALIGNMENT_TOP_LEFT && alignment <= SsaStyle.SSA_ALIGNMENT_TOP_RIGHT;
+          line += isTopAlignment ? marginVertical : -marginVertical;
+        }
+      }
+      cue.setPosition(position);
+      cue.setLine(line, LINE_TYPE_FRACTION);
     }
 
     return cue.build();
@@ -548,6 +649,11 @@ public final class SsaParser implements SubtitleParser {
     }
   }
 
+  private static float resolveMargin(float dialogueMargin, float styleMargin) {
+    if (dialogueMargin != 0f) return dialogueMargin;
+    return styleMargin != Cue.DIMEN_UNSET ? styleMargin : 0f;
+  }
+
   private static float computeDefaultLineOrPosition(@Cue.AnchorType int anchor) {
     switch (anchor) {
       case Cue.ANCHOR_TYPE_START:
@@ -560,6 +666,22 @@ public final class SsaParser implements SubtitleParser {
       default:
         return Cue.DIMEN_UNSET;
     }
+  }
+
+  /**
+   * Counts the number of visual lines in SSA dialogue text, accounting for {@code \N} and {@code
+   * \n} line breaks (outside style override braces).
+   */
+  private static int countTextLines(String rawText) {
+    String stripped = SsaStyle.Overrides.stripStyleOverrides(rawText);
+    int lines = 1;
+    for (int i = 0; i + 1 < stripped.length(); i++) {
+      if (stripped.charAt(i) == '\\' && (stripped.charAt(i + 1) == 'N' || stripped.charAt(i + 1) == 'n')) {
+        lines++;
+        i++;
+      }
+    }
+    return lines;
   }
 
   /**
