@@ -89,6 +89,7 @@ public final class FlvExtractor implements Extractor {
   private int tagDataSize;
   private long tagTimestampUs;
   private boolean outputSeekMap;
+  private boolean tracksEnded;
   private @MonotonicNonNull AudioTagPayloadReader audioReader;
   private @MonotonicNonNull VideoTagPayloadReader videoReader;
 
@@ -146,6 +147,12 @@ public final class FlvExtractor implements Extractor {
       state = STATE_READING_TAG_HEADER;
     }
     bytesToNextTagHeader = 0;
+    if (audioReader != null) {
+      audioReader.seek();
+    }
+    if (videoReader != null) {
+      videoReader.seek();
+    }
   }
 
   @Override
@@ -161,6 +168,7 @@ public final class FlvExtractor implements Extractor {
       switch (state) {
         case STATE_READING_FLV_HEADER:
           if (!readFlvHeader(input)) {
+            maybeEndTracks();
             return RESULT_END_OF_INPUT;
           }
           break;
@@ -169,6 +177,7 @@ public final class FlvExtractor implements Extractor {
           break;
         case STATE_READING_TAG_HEADER:
           if (!readTagHeader(input)) {
+            maybeEndTracks();
             return RESULT_END_OF_INPUT;
           }
           break;
@@ -199,22 +208,10 @@ public final class FlvExtractor implements Extractor {
     }
 
     headerBuffer.setPosition(0);
-    headerBuffer.skipBytes(4);
-    int flags = headerBuffer.readUnsignedByte();
-    boolean hasAudio = (flags & 0x04) != 0;
-    boolean hasVideo = (flags & 0x01) != 0;
-    if (hasAudio && audioReader == null) {
-      audioReader =
-          new AudioTagPayloadReader(extractorOutput.track(TAG_TYPE_AUDIO, C.TRACK_TYPE_AUDIO));
-    }
-    if (hasVideo && videoReader == null) {
-      videoReader =
-          new VideoTagPayloadReader(extractorOutput.track(TAG_TYPE_VIDEO, C.TRACK_TYPE_VIDEO));
-    }
-    extractorOutput.endTracks();
+    headerBuffer.skipBytes(5); // Skip signature, version, and audio/video flags.
 
     // We need to skip any additional content in the FLV header, plus the 4 byte previous tag size.
-    bytesToNextTagHeader = headerBuffer.readInt() - FLV_HEADER_SIZE + 4;
+    bytesToNextTagHeader = max(0, headerBuffer.readInt() - FLV_HEADER_SIZE) + 4;
     state = STATE_SKIPPING_TO_TAG_HEADER;
     return true;
   }
@@ -266,28 +263,59 @@ public final class FlvExtractor implements Extractor {
     boolean wasConsumed = true;
     boolean wasSampleOutput = false;
     long timestampUs = getCurrentTimestampUs();
-    if (tagType == TAG_TYPE_AUDIO && audioReader != null) {
-      ensureReadyForMediaOutput();
-      wasSampleOutput = audioReader.consume(prepareTagData(input), timestampUs);
-    } else if (tagType == TAG_TYPE_VIDEO && videoReader != null) {
-      ensureReadyForMediaOutput();
-      wasSampleOutput = videoReader.consume(prepareTagData(input), timestampUs);
+    if (tagType == TAG_TYPE_AUDIO) {
+      if (audioReader == null && tracksEnded) {
+        input.skipFully(tagDataSize);
+        wasConsumed = false;
+      } else {
+        if (audioReader == null) {
+          audioReader = new AudioTagPayloadReader(extractorOutput.track(TAG_TYPE_AUDIO, C.TRACK_TYPE_AUDIO));
+        }
+        ensureReadyForMediaOutput();
+        maybeFinalizeTrackDiscovery();
+        if (tagDataSize > 0) {
+          wasSampleOutput = audioReader.consume(prepareTagData(input), timestampUs);
+        } else {
+          wasConsumed = false;
+        }
+      }
+    } else if (tagType == TAG_TYPE_VIDEO) {
+      if (videoReader == null && tracksEnded) {
+        input.skipFully(tagDataSize);
+        wasConsumed = false;
+      } else {
+        if (videoReader == null) {
+          videoReader = new VideoTagPayloadReader(extractorOutput.track(TAG_TYPE_VIDEO, C.TRACK_TYPE_VIDEO));
+        }
+        ensureReadyForMediaOutput();
+        maybeFinalizeTrackDiscovery();
+        if (tagDataSize > 0) {
+          wasSampleOutput = videoReader.consume(prepareTagData(input), timestampUs);
+        } else {
+          wasConsumed = false;
+        }
+      }
     } else if (tagType == TAG_TYPE_SCRIPT_DATA && !outputSeekMap) {
-      wasSampleOutput = metadataReader.consume(prepareTagData(input), timestampUs);
-      long durationUs = metadataReader.getDurationUs();
-      if (durationUs != C.TIME_UNSET) {
-        extractorOutput.seekMap(
-            new IndexSeekMap(
-                metadataReader.getKeyFrameTagPositions(),
-                metadataReader.getKeyFrameTimesUs(),
-                durationUs));
-        outputSeekMap = true;
+      if (tagDataSize > 0) {
+        wasSampleOutput = metadataReader.consume(prepareTagData(input), timestampUs);
+        long durationUs = metadataReader.getDurationUs();
+        if (durationUs != C.TIME_UNSET) {
+          extractorOutput.seekMap(
+              new IndexSeekMap(
+                  metadataReader.getKeyFrameTagPositions(),
+                  metadataReader.getKeyFrameTimesUs(),
+                  durationUs));
+          outputSeekMap = true;
+        }
+      } else {
+        wasConsumed = false;
       }
     } else {
       input.skipFully(tagDataSize);
       wasConsumed = false;
     }
     if (!outputFirstSample && wasSampleOutput) {
+      maybeEndTracks();
       outputFirstSample = true;
       mediaTagTimestampOffsetUs =
           metadataReader.getDurationUs() == C.TIME_UNSET ? -tagTimestampUs : 0;
@@ -313,6 +341,21 @@ public final class FlvExtractor implements Extractor {
     if (!outputSeekMap) {
       extractorOutput.seekMap(new SeekMap.Unseekable(C.TIME_UNSET));
       outputSeekMap = true;
+    }
+  }
+
+  @RequiresNonNull("extractorOutput")
+  private void maybeEndTracks() {
+    if (!tracksEnded) {
+      extractorOutput.endTracks();
+      tracksEnded = true;
+    }
+  }
+
+  @RequiresNonNull("extractorOutput")
+  private void maybeFinalizeTrackDiscovery() {
+    if (audioReader != null && videoReader != null) {
+      maybeEndTracks();
     }
   }
 

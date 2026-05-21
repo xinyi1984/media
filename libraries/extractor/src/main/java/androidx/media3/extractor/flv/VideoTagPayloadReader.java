@@ -22,13 +22,16 @@ import androidx.media3.common.ParserException;
 import androidx.media3.common.util.ParsableByteArray;
 import androidx.media3.container.NalUnitUtil;
 import androidx.media3.extractor.AvcConfig;
+import androidx.media3.extractor.HevcConfig;
 import androidx.media3.extractor.TrackOutput;
+import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 
 /** Parses video tags from an FLV stream and extracts H.264 nal units. */
 /* package */ final class VideoTagPayloadReader extends TagPayloadReader {
 
   // Video codec.
   private static final int VIDEO_CODEC_AVC = 7;
+  private static final int VIDEO_CODEC_HEVC = 12;
 
   // Frame types.
   private static final int VIDEO_FRAME_KEYFRAME = 1;
@@ -46,7 +49,10 @@ import androidx.media3.extractor.TrackOutput;
   // State variables.
   private boolean hasOutputFormat;
   private boolean hasOutputKeyframe;
+  private @MonotonicNonNull Format format;
+  private @MonotonicNonNull Format pendingFormat;
   private int frameType;
+  private int videoCodec;
 
   /**
    * @param output A {@link TrackOutput} to which samples should be written.
@@ -65,13 +71,11 @@ import androidx.media3.extractor.TrackOutput;
   @Override
   protected boolean parseHeader(ParsableByteArray data) throws UnsupportedFormatException {
     int header = data.readUnsignedByte();
-    int frameType = (header >> 4) & 0x0F;
-    int videoCodec = (header & 0x0F);
-    // Support just H.264 encoded content.
-    if (videoCodec != VIDEO_CODEC_AVC) {
+    videoCodec = (header & 0x0F);
+    if (videoCodec != VIDEO_CODEC_AVC && videoCodec != VIDEO_CODEC_HEVC) {
       throw new UnsupportedFormatException("Video format not supported: " + videoCodec);
     }
-    this.frameType = frameType;
+    frameType = (header >> 4) & 0x0F;
     return (frameType != VIDEO_FRAME_VIDEO_INFO);
   }
 
@@ -81,30 +85,26 @@ import androidx.media3.extractor.TrackOutput;
     int compositionTimeMs = data.readInt24();
 
     timeUs += compositionTimeMs * 1000L;
-    // Parse avc sequence header in case this was not done before.
-    if (packetType == AVC_PACKET_TYPE_SEQUENCE_HEADER && !hasOutputFormat) {
+    // Parse sequence headers in case this was not done before, or in case the stream updates them.
+    if (packetType == AVC_PACKET_TYPE_SEQUENCE_HEADER) {
       ParsableByteArray videoSequence = new ParsableByteArray(new byte[data.bytesLeft()]);
       data.readBytes(videoSequence.getData(), 0, data.bytesLeft());
-      AvcConfig avcConfig = AvcConfig.parse(videoSequence);
-      nalUnitLengthFieldLength = avcConfig.nalUnitLengthFieldLength;
-      // Construct and output the format.
-      Format format =
-          new Format.Builder()
-              .setContainerMimeType(MimeTypes.VIDEO_FLV)
-              .setSampleMimeType(MimeTypes.VIDEO_H264)
-              .setCodecs(avcConfig.codecs)
-              .setWidth(avcConfig.width)
-              .setHeight(avcConfig.height)
-              .setPixelWidthHeightRatio(avcConfig.pixelWidthHeightRatio)
-              .setInitializationData(avcConfig.initializationData)
-              .build();
-      output.format(format);
-      hasOutputFormat = true;
+      Format newFormat = videoCodec == VIDEO_CODEC_AVC ? parseAvcFormat(videoSequence) : parseHevcFormat(videoSequence);
+      if (!newFormat.equals(format)) {
+        pendingFormat = newFormat;
+      }
+      hasOutputKeyframe = false;
       return false;
-    } else if (packetType == AVC_PACKET_TYPE_AVC_NALU && hasOutputFormat) {
+    } else if (packetType == AVC_PACKET_TYPE_AVC_NALU && (hasOutputFormat || pendingFormat != null)) {
       boolean isKeyframe = frameType == VIDEO_FRAME_KEYFRAME;
       if (!hasOutputKeyframe && !isKeyframe) {
         return false;
+      }
+      if (pendingFormat != null) {
+        format = pendingFormat;
+        pendingFormat = null;
+        output.format(format);
+        hasOutputFormat = true;
       }
       // TODO: Deduplicate with Mp4Extractor.
       // Zero the top three bytes of the array that we'll use to decode nal unit lengths, in case
@@ -124,6 +124,9 @@ import androidx.media3.extractor.TrackOutput;
         data.readBytes(nalLength.getData(), nalUnitLengthFieldLengthDiff, nalUnitLengthFieldLength);
         nalLength.setPosition(0);
         bytesToWrite = nalLength.readUnsignedIntToInt();
+        if (bytesToWrite == 0) {
+          continue;
+        }
 
         // Write a start code for the current NAL unit.
         nalStartCode.setPosition(0);
@@ -134,12 +137,39 @@ import androidx.media3.extractor.TrackOutput;
         output.sampleData(data, bytesToWrite);
         bytesWritten += bytesToWrite;
       }
-      output.sampleMetadata(
-          timeUs, isKeyframe ? C.BUFFER_FLAG_KEY_FRAME : 0, bytesWritten, 0, null);
+      output.sampleMetadata(timeUs, isKeyframe ? C.BUFFER_FLAG_KEY_FRAME : 0, bytesWritten, 0, null);
       hasOutputKeyframe = true;
       return true;
     } else {
       return false;
     }
+  }
+
+  private Format parseAvcFormat(ParsableByteArray videoSequence) throws ParserException {
+    AvcConfig avcConfig = AvcConfig.parse(videoSequence);
+    nalUnitLengthFieldLength = avcConfig.nalUnitLengthFieldLength;
+    return new Format.Builder()
+        .setContainerMimeType(MimeTypes.VIDEO_FLV)
+        .setSampleMimeType(MimeTypes.VIDEO_H264)
+        .setCodecs(avcConfig.codecs)
+        .setWidth(avcConfig.width)
+        .setHeight(avcConfig.height)
+        .setPixelWidthHeightRatio(avcConfig.pixelWidthHeightRatio)
+        .setInitializationData(avcConfig.initializationData)
+        .build();
+  }
+
+  private Format parseHevcFormat(ParsableByteArray videoSequence) throws ParserException {
+    HevcConfig hevcConfig = HevcConfig.parse(videoSequence);
+    nalUnitLengthFieldLength = hevcConfig.nalUnitLengthFieldLength;
+    return new Format.Builder()
+        .setContainerMimeType(MimeTypes.VIDEO_FLV)
+        .setSampleMimeType(MimeTypes.VIDEO_H265)
+        .setCodecs(hevcConfig.codecs)
+        .setWidth(hevcConfig.width)
+        .setHeight(hevcConfig.height)
+        .setPixelWidthHeightRatio(hevcConfig.pixelWidthHeightRatio)
+        .setInitializationData(hevcConfig.initializationData)
+        .build();
   }
 }
