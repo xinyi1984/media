@@ -80,7 +80,7 @@ import javax.crypto.spec.SecretKeySpec;
       throw new RuntimeException(e);
     }
 
-    Key cipherKey = new SecretKeySpec(encryptionKey, "AES");
+    Key cipherKey = new SecretKeySpec(encryptionKey, 0, Math.min(encryptionKey.length, 16), "AES");
     AlgorithmParameterSpec cipherIV = new IvParameterSpec(encryptionIv);
 
     try {
