@@ -608,6 +608,30 @@ public class SimpleExoPlayer extends BasePlayer implements ExoPlayer {
   }
 
   @Override
+  public void setAudioOffsetMs(long audioOffsetMs) {
+    blockUntilConstructorFinished();
+    player.setAudioOffsetMs(audioOffsetMs);
+  }
+
+  @Override
+  public long getAudioOffsetMs() {
+    blockUntilConstructorFinished();
+    return player.getAudioOffsetMs();
+  }
+
+  @Override
+  public void setTextOffsetMs(long textOffsetMs) {
+    blockUntilConstructorFinished();
+    player.setTextOffsetMs(textOffsetMs);
+  }
+
+  @Override
+  public long getTextOffsetMs() {
+    blockUntilConstructorFinished();
+    return player.getTextOffsetMs();
+  }
+
+  @Override
   public void mute() {
     blockUntilConstructorFinished();
     player.mute();

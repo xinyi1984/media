@@ -121,6 +121,8 @@ public abstract class SimpleBasePlayer extends BasePlayer {
       private int audioSessionId;
       private float volume;
       private float unmuteVolume;
+      private long audioOffsetMs;
+      private long textOffsetMs;
       private VideoSize videoSize;
       private CueGroup currentCues;
       private DeviceInfo deviceInfo;
@@ -168,6 +170,8 @@ public abstract class SimpleBasePlayer extends BasePlayer {
         audioSessionId = C.AUDIO_SESSION_ID_UNSET;
         volume = 1f;
         unmuteVolume = 1f;
+        audioOffsetMs = 0;
+        textOffsetMs = 0;
         videoSize = VideoSize.UNKNOWN;
         currentCues = CueGroup.EMPTY_TIME_ZERO;
         deviceInfo = DeviceInfo.UNKNOWN;
@@ -215,6 +219,8 @@ public abstract class SimpleBasePlayer extends BasePlayer {
         this.audioSessionId = state.audioSessionId;
         this.volume = state.volume;
         this.unmuteVolume = state.unmuteVolume;
+        this.audioOffsetMs = state.audioOffsetMs;
+        this.textOffsetMs = state.textOffsetMs;
         this.videoSize = state.videoSize;
         this.currentCues = state.currentCues;
         this.deviceInfo = state.deviceInfo;
@@ -474,6 +480,30 @@ public abstract class SimpleBasePlayer extends BasePlayer {
       public Builder setUnmuteVolume(@FloatRange(from = 0, to = 1.0) float unmuteVolume) {
         checkArgument(unmuteVolume >= 0.0f && unmuteVolume <= 1.0f);
         this.unmuteVolume = unmuteVolume;
+        return this;
+      }
+
+      /**
+       * Sets the audio playback offset in milliseconds.
+       *
+       * @param audioOffsetMs The audio playback offset, in milliseconds.
+       * @return This builder.
+       */
+      @CanIgnoreReturnValue
+      public Builder setAudioOffsetMs(long audioOffsetMs) {
+        this.audioOffsetMs = audioOffsetMs;
+        return this;
+      }
+
+      /**
+       * Sets the text display offset in milliseconds.
+       *
+       * @param textOffsetMs The text display offset, in milliseconds.
+       * @return This builder.
+       */
+      @CanIgnoreReturnValue
+      public Builder setTextOffsetMs(long textOffsetMs) {
+        this.textOffsetMs = textOffsetMs;
         return this;
       }
 
@@ -904,6 +934,12 @@ public abstract class SimpleBasePlayer extends BasePlayer {
     @FloatRange(from = 0, to = 1.0)
     public final float unmuteVolume;
 
+    /** The audio display offset, in milliseconds. */
+    public final long audioOffsetMs;
+
+    /** The text display offset, in milliseconds. */
+    public final long textOffsetMs;
+
     /** The current video size. */
     public final VideoSize videoSize;
 
@@ -1117,6 +1153,8 @@ public abstract class SimpleBasePlayer extends BasePlayer {
       this.audioSessionId = builder.audioSessionId;
       this.volume = builder.volume;
       this.unmuteVolume = builder.unmuteVolume;
+      this.audioOffsetMs = builder.audioOffsetMs;
+      this.textOffsetMs = builder.textOffsetMs;
       this.videoSize = builder.videoSize;
       this.currentCues = builder.currentCues;
       this.deviceInfo = builder.deviceInfo;
@@ -1195,6 +1233,8 @@ public abstract class SimpleBasePlayer extends BasePlayer {
           && audioAttributes.equals(state.audioAttributes)
           && volume == state.volume
           && unmuteVolume == state.unmuteVolume
+          && audioOffsetMs == state.audioOffsetMs
+          && textOffsetMs == state.textOffsetMs
           && videoSize.equals(state.videoSize)
           && currentCues.equals(state.currentCues)
           && deviceInfo.equals(state.deviceInfo)
@@ -1241,6 +1281,8 @@ public abstract class SimpleBasePlayer extends BasePlayer {
       result = 31 * result + audioAttributes.hashCode();
       result = 31 * result + Float.floatToRawIntBits(volume);
       result = 31 * result + Float.floatToRawIntBits(unmuteVolume);
+      result = 31 * result + (int) (audioOffsetMs ^ (audioOffsetMs >>> 32));
+      result = 31 * result + (int) (textOffsetMs ^ (textOffsetMs >>> 32));
       result = 31 * result + videoSize.hashCode();
       result = 31 * result + currentCues.hashCode();
       result = 31 * result + deviceInfo.hashCode();
@@ -2835,6 +2877,44 @@ public abstract class SimpleBasePlayer extends BasePlayer {
   }
 
   @Override
+  public final void setAudioOffsetMs(long audioOffsetMs) {
+    verifyApplicationThreadAndInitState();
+    State state = this.state;
+    if (!shouldHandleCommand(Player.COMMAND_SET_AUDIO_OFFSET)) {
+      return;
+    }
+    updateStateForPendingOperation(
+        /* pendingOperation= */ handleSetAudioOffsetMs(audioOffsetMs),
+        /* placeholderStateSupplier= */ () ->
+            state.buildUpon().setAudioOffsetMs(audioOffsetMs).build());
+  }
+
+  @Override
+  public final long getAudioOffsetMs() {
+    verifyApplicationThreadAndInitState();
+    return state.audioOffsetMs;
+  }
+
+  @Override
+  public final void setTextOffsetMs(long textOffsetMs) {
+    verifyApplicationThreadAndInitState();
+    State state = this.state;
+    if (!shouldHandleCommand(Player.COMMAND_SET_TEXT_OFFSET)) {
+      return;
+    }
+    updateStateForPendingOperation(
+        /* pendingOperation= */ handleSetTextOffsetMs(textOffsetMs),
+        /* placeholderStateSupplier= */ () ->
+            state.buildUpon().setTextOffsetMs(textOffsetMs).build());
+  }
+
+  @Override
+  public final long getTextOffsetMs() {
+    verifyApplicationThreadAndInitState();
+    return state.textOffsetMs;
+  }
+
+  @Override
   public final void mute() {
     verifyApplicationThreadAndInitState();
     State state = this.state;
@@ -3340,6 +3420,34 @@ public abstract class SimpleBasePlayer extends BasePlayer {
       TrackSelectionParameters trackSelectionParameters) {
     throw new IllegalStateException(
         "Missing implementation to handle COMMAND_SET_TRACK_SELECTION_PARAMETERS");
+  }
+
+  /**
+   * Handles calls to {@link Player#setAudioOffsetMs}.
+   *
+   * <p>Will only be called if {@link Player#COMMAND_SET_AUDIO_OFFSET} is available.
+   *
+   * @param audioOffsetMs The requested audio display offset, in milliseconds.
+   * @return A {@link ListenableFuture} indicating the completion of all immediate {@link State}
+   *     changes caused by this call.
+   */
+  @ForOverride
+  protected ListenableFuture<?> handleSetAudioOffsetMs(long audioOffsetMs) {
+    throw new IllegalStateException("Missing implementation to handle COMMAND_SET_AUDIO_OFFSET");
+  }
+
+  /**
+   * Handles calls to {@link Player#setTextOffsetMs}.
+   *
+   * <p>Will only be called if {@link Player#COMMAND_SET_TEXT_OFFSET} is available.
+   *
+   * @param textOffsetMs The requested text display offset, in milliseconds.
+   * @return A {@link ListenableFuture} indicating the completion of all immediate {@link State}
+   *     changes caused by this call.
+   */
+  @ForOverride
+  protected ListenableFuture<?> handleSetTextOffsetMs(long textOffsetMs) {
+    throw new IllegalStateException("Missing implementation to handle COMMAND_SET_TEXT_OFFSET");
   }
 
   /**

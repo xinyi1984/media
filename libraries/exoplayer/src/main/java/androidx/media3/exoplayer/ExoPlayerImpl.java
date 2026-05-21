@@ -226,6 +226,8 @@ import java.util.function.IntConsumer;
   private AudioAttributes audioAttributes;
   private float volume;
   private float unmuteVolume;
+  private long audioOffsetMs;
+  private long textOffsetMs;
   private boolean skipSilenceEnabled;
   private CueGroup currentCueGroup;
   @Nullable private VideoFrameMetadataListener videoFrameMetadataListener;
@@ -346,11 +348,15 @@ import java.util.function.IntConsumer;
                   COMMAND_CHANGE_MEDIA_ITEMS,
                   COMMAND_GET_TRACKS,
                   COMMAND_GET_AUDIO_ATTRIBUTES,
+                  COMMAND_GET_AUDIO_OFFSET,
+                  COMMAND_SET_AUDIO_OFFSET,
                   COMMAND_SET_AUDIO_ATTRIBUTES,
                   COMMAND_GET_VOLUME,
                   COMMAND_SET_VOLUME,
                   COMMAND_SET_VIDEO_SURFACE,
                   COMMAND_GET_TEXT,
+                  COMMAND_GET_TEXT_OFFSET,
+                  COMMAND_SET_TEXT_OFFSET,
                   COMMAND_RELEASE)
               .addIf(
                   COMMAND_SET_TRACK_SELECTION_PARAMETERS, trackSelector.isSetParametersSupported())
@@ -1668,6 +1674,38 @@ import java.util.function.IntConsumer;
   public float getVolume() {
     verifyApplicationThread();
     return volume;
+  }
+
+  @Override
+  public void setAudioOffsetMs(long audioOffsetMs) {
+    verifyApplicationThread();
+    if (this.audioOffsetMs == audioOffsetMs) {
+      return;
+    }
+    this.audioOffsetMs = audioOffsetMs;
+    internalPlayer.setAudioOffsetMs(audioOffsetMs);
+  }
+
+  @Override
+  public long getAudioOffsetMs() {
+    verifyApplicationThread();
+    return audioOffsetMs;
+  }
+
+  @Override
+  public void setTextOffsetMs(long textOffsetMs) {
+    verifyApplicationThread();
+    if (this.textOffsetMs == textOffsetMs) {
+      return;
+    }
+    this.textOffsetMs = textOffsetMs;
+    internalPlayer.setTextOffsetMs(textOffsetMs);
+  }
+
+  @Override
+  public long getTextOffsetMs() {
+    verifyApplicationThread();
+    return textOffsetMs;
   }
 
   @Override

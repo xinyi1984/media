@@ -201,8 +201,9 @@ public interface Renderer extends PlayerMessage.Target {
    * #MSG_SET_VIDEO_OUTPUT_RESOLUTION}, {@link #MSG_SET_IMAGE_OUTPUT}, {@link #MSG_SET_PRIORITY},
    * {@link #MSG_TRANSFER_RESOURCES}, {@link #MSG_SET_SCRUBBING_MODE}, {@link
    * #MSG_SET_VIRTUAL_DEVICE_ID}, {@link #MSG_SET_AUDIO_OUTPUT_PROVIDER}, {@link
-   * #MSG_SET_CODEC_PARAMETERS} or {@link #MSG_SET_SUBSCRIBED_CODEC_PARAMETER_KEYS}. May also be an
-   * app-defined value (see {@link #MSG_CUSTOM_BASE}).
+   * #MSG_SET_CODEC_PARAMETERS}, {@link #MSG_SET_SUBSCRIBED_CODEC_PARAMETER_KEYS}, {@link
+   * #MSG_SET_IMAGE_METADATA_LISTENER}, {@link #MSG_SET_TEXT_OFFSET}, {@link
+   * #MSG_SET_AUDIO_OFFSET}. May also be an app-defined value (see {@link #MSG_CUSTOM_BASE}).
    */
   @Documented
   @Retention(RetentionPolicy.SOURCE)
@@ -232,7 +233,9 @@ public interface Renderer extends PlayerMessage.Target {
         MSG_SET_AUDIO_OUTPUT_PROVIDER,
         MSG_SET_CODEC_PARAMETERS,
         MSG_SET_SUBSCRIBED_CODEC_PARAMETER_KEYS,
-        MSG_SET_IMAGE_METADATA_LISTENER
+        MSG_SET_IMAGE_METADATA_LISTENER,
+        MSG_SET_TEXT_OFFSET,
+        MSG_SET_AUDIO_OFFSET
       })
   public @interface MessageType {}
 
@@ -417,6 +420,22 @@ public interface Renderer extends PlayerMessage.Target {
    * ImageMetadataListener} instance, or null.
    */
   int MSG_SET_IMAGE_METADATA_LISTENER = 23;
+
+  /**
+   * The type of a message that can be passed to a text renderer to set the text display offset.
+   *
+   * <p>The message payload should be a {@link Long} representing the offset in milliseconds. A
+   * positive value delays subtitles. A negative value shows subtitles earlier.
+   */
+  int MSG_SET_TEXT_OFFSET = 24;
+
+  /**
+   * The type of a message that can be passed to an audio renderer to set the audio playback offset.
+   *
+   * <p>The message payload should be a {@link Long} representing the offset in milliseconds. A
+   * positive value delays audio. A negative value plays audio earlier.
+   */
+  int MSG_SET_AUDIO_OFFSET = 25;
 
   /**
    * Applications or extensions may define custom {@code MSG_*} constants that can be passed to

@@ -36,6 +36,7 @@ import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import androidx.media3.decoder.DecoderInputBuffer;
 import androidx.media3.exoplayer.BaseRenderer;
+import androidx.media3.exoplayer.ExoPlaybackException;
 import androidx.media3.exoplayer.FormatHolder;
 import androidx.media3.exoplayer.Renderer;
 import androidx.media3.exoplayer.RendererCapabilities;
@@ -70,6 +71,17 @@ import org.checkerframework.dataflow.qual.SideEffectFree;
 public final class TextRenderer extends BaseRenderer implements Callback {
 
   private static final String TAG = "TextRenderer";
+
+  /**
+   * The type of a message that can be passed to this renderer via {@link
+   * androidx.media3.exoplayer.ExoPlayer#createMessage(
+   * androidx.media3.exoplayer.PlayerMessage.Target)} to set the text display offset, in
+   * milliseconds.
+   *
+   * <p>The message payload must be a {@link Long}. A positive value delays subtitles, and a negative
+   * value shows subtitles earlier.
+   */
+  public static final int MSG_SET_TEXT_OFFSET = Renderer.MSG_SET_TEXT_OFFSET;
 
   @Documented
   @Retention(RetentionPolicy.SOURCE)
@@ -124,6 +136,8 @@ public final class TextRenderer extends BaseRenderer implements Callback {
   @Nullable private Format streamFormat;
   private long lastRendererPositionUs;
   private long finalStreamEndPositionUs;
+  private long textOffsetUs;
+  private boolean textOffsetChanged;
   private boolean legacyDecodingEnabled;
 
   /**
@@ -163,6 +177,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
     finalStreamEndPositionUs = C.TIME_UNSET;
     lastRendererPositionUs = C.TIME_UNSET;
     legacyDecodingEnabled = true;
+    textOffsetUs = 0;
   }
 
   @Override
@@ -201,6 +216,36 @@ public final class TextRenderer extends BaseRenderer implements Callback {
     this.finalStreamEndPositionUs = streamEndPositionUs;
   }
 
+  /**
+   * Sets the text display offset in milliseconds.
+   *
+   * <p>A positive value delays subtitles. A negative value shows subtitles earlier.
+   */
+  public void setTextOffsetMs(long textOffsetMs) {
+    setTextOffsetUs(textOffsetMs * 1000);
+  }
+
+  /**
+   * Sets the text display offset in microseconds.
+   *
+   * <p>A positive value delays subtitles. A negative value shows subtitles earlier.
+   */
+  public void setTextOffsetUs(long textOffsetUs) {
+    if (this.textOffsetUs == textOffsetUs) {
+      return;
+    }
+    this.textOffsetUs = textOffsetUs;
+    textOffsetChanged = true;
+    if (lastRendererPositionUs != C.TIME_UNSET) {
+      clearOutput();
+    }
+  }
+
+  /** Returns the text display offset in microseconds. */
+  public long getTextOffsetUs() {
+    return textOffsetUs;
+  }
+
   @Override
   protected void onStreamChanged(
       Format[] formats,
@@ -233,6 +278,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
     clearOutput();
     inputStreamEnded = false;
     outputStreamEnded = false;
+    textOffsetChanged = false;
     finalStreamEndPositionUs = C.TIME_UNSET;
     if (streamFormat != null && !isCuesWithTiming(streamFormat)) {
       if (decoderReplacementState != REPLACEMENT_STATE_NONE) {
@@ -294,22 +340,29 @@ public final class TextRenderer extends BaseRenderer implements Callback {
 
   @RequiresNonNull("this.cuesResolver")
   private void renderFromCuesWithTiming(long positionUs) {
-    boolean outputNeedsUpdating = readAndDecodeCuesWithTiming(positionUs);
+    long subtitlePositionUs = getTextPositionUs(positionUs);
+    boolean outputNeedsUpdating = readAndDecodeCuesWithTiming(subtitlePositionUs);
 
-    long nextCueChangeTimeUs = cuesResolver.getNextCueChangeTimeUs(lastRendererPositionUs);
+    long lastSubtitlePositionUs = getTextPositionUs(lastRendererPositionUs);
+    long nextCueChangeTimeUs = cuesResolver.getNextCueChangeTimeUs(lastSubtitlePositionUs);
     if (nextCueChangeTimeUs == C.TIME_END_OF_SOURCE && inputStreamEnded && !outputNeedsUpdating) {
       outputStreamEnded = true;
     }
-    if (nextCueChangeTimeUs != C.TIME_END_OF_SOURCE && nextCueChangeTimeUs <= positionUs) {
+    if (nextCueChangeTimeUs != C.TIME_END_OF_SOURCE && nextCueChangeTimeUs <= subtitlePositionUs) {
       outputNeedsUpdating = true;
     }
+    outputNeedsUpdating |= textOffsetChanged;
 
     if (outputNeedsUpdating) {
-      ImmutableList<Cue> cuesAtTimeUs = cuesResolver.getCuesAtTimeUs(positionUs);
-      long previousCueChangeTimeUs = cuesResolver.getPreviousCueChangeTimeUs(positionUs);
-      updateOutput(new CueGroup(cuesAtTimeUs, getPresentationTimeUs(previousCueChangeTimeUs)));
-      cuesResolver.discardCuesBeforeTimeUs(previousCueChangeTimeUs);
+      ImmutableList<Cue> cuesAtTimeUs = cuesResolver.getCuesAtTimeUs(subtitlePositionUs);
+      long previousCueChangeTimeUs = cuesResolver.getPreviousCueChangeTimeUs(subtitlePositionUs);
+      long presentationPositionUs = previousCueChangeTimeUs == C.TIME_UNSET ? positionUs : getRendererPositionUs(previousCueChangeTimeUs);
+      updateOutput(new CueGroup(cuesAtTimeUs, getPresentationTimeUs(presentationPositionUs)));
+      if (previousCueChangeTimeUs != C.TIME_UNSET) {
+        cuesResolver.discardCuesBeforeTimeUs(previousCueChangeTimeUs);
+      }
     }
+    textOffsetChanged = false;
     lastRendererPositionUs = positionUs;
   }
 
@@ -351,9 +404,10 @@ public final class TextRenderer extends BaseRenderer implements Callback {
   }
 
   private void renderFromSubtitles(long positionUs) {
+    long subtitlePositionUs = getTextPositionUs(positionUs);
     lastRendererPositionUs = positionUs;
     if (nextSubtitle == null) {
-      checkNotNull(subtitleDecoder).setPositionUs(positionUs);
+      checkNotNull(subtitleDecoder).setPositionUs(subtitlePositionUs);
       try {
         nextSubtitle = checkNotNull(subtitleDecoder).dequeueOutputBuffer();
       } catch (SubtitleDecoderException e) {
@@ -371,7 +425,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
       // We're iterating through the events in a subtitle. Set textRendererNeedsUpdate if we
       // advance to the next event.
       long subtitleNextEventTimeUs = getNextEventTime();
-      while (subtitleNextEventTimeUs <= positionUs) {
+      while (subtitleNextEventTimeUs <= subtitlePositionUs) {
         nextSubtitleEventIndex++;
         subtitleNextEventTimeUs = getNextEventTime();
         textRendererNeedsUpdate = true;
@@ -388,26 +442,28 @@ public final class TextRenderer extends BaseRenderer implements Callback {
             outputStreamEnded = true;
           }
         }
-      } else if (nextSubtitle.timeUs <= positionUs) {
+      } else if (nextSubtitle.timeUs <= subtitlePositionUs) {
         // Advance to the next subtitle. Sync the next event index and trigger an update.
         if (subtitle != null) {
           subtitle.release();
         }
-        nextSubtitleEventIndex = nextSubtitle.getNextEventTimeIndex(positionUs);
+        nextSubtitleEventIndex = nextSubtitle.getNextEventTimeIndex(subtitlePositionUs);
         subtitle = nextSubtitle;
         this.nextSubtitle = null;
         textRendererNeedsUpdate = true;
       }
     }
+    textRendererNeedsUpdate |= textOffsetChanged && subtitle != null;
 
     if (textRendererNeedsUpdate) {
       // If textRendererNeedsUpdate then subtitle must be non-null.
       checkNotNull(subtitle);
       // textRendererNeedsUpdate is set and we're playing. Update the renderer.
-      long presentationTimeUs = getPresentationTimeUs(getCurrentEventTimeUs(positionUs));
-      CueGroup cueGroup = new CueGroup(subtitle.getCues(positionUs), presentationTimeUs);
+      long presentationTimeUs = getPresentationTimeUs(getRendererPositionUs(getCurrentEventTimeUs(subtitlePositionUs)));
+      CueGroup cueGroup = new CueGroup(subtitle.getCues(subtitlePositionUs), presentationTimeUs);
       updateOutput(cueGroup);
     }
+    textOffsetChanged = false;
 
     if (decoderReplacementState == REPLACEMENT_STATE_WAIT_END_OF_STREAM) {
       return;
@@ -484,7 +540,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
     // We don't block playback whilst subtitles are loading.
     // Note: To change this behavior, it will be necessary to consider [Internal: b/12949941].
     if (isCuesWithTiming(checkNotNull(streamFormat))) {
-      if (checkNotNull(cuesResolver).getNextCueChangeTimeUs(lastRendererPositionUs)
+      if (checkNotNull(cuesResolver).getNextCueChangeTimeUs(getTextPositionUs(lastRendererPositionUs))
           != C.TIME_END_OF_SOURCE) {
         // We have a cue change loaded in the future.
         return true;
@@ -501,8 +557,8 @@ public final class TextRenderer extends BaseRenderer implements Callback {
     } else {
       return !outputStreamEnded
           && (!inputStreamEnded
-              || hasEventsAfter(subtitle, lastRendererPositionUs)
-              || hasEventsAfter(nextSubtitle, lastRendererPositionUs)
+              || hasEventsAfter(subtitle, getTextPositionUs(lastRendererPositionUs))
+              || hasEventsAfter(nextSubtitle, getTextPositionUs(lastRendererPositionUs))
               || nextSubtitleInputBuffer == null);
     }
   }
@@ -612,6 +668,25 @@ public final class TextRenderer extends BaseRenderer implements Callback {
   private long getPresentationTimeUs(long positionUs) {
     checkState(positionUs != C.TIME_UNSET);
     return positionUs - getStreamOffsetUs();
+  }
+
+  @SideEffectFree
+  private long getTextPositionUs(long rendererPositionUs) {
+    return rendererPositionUs == C.TIME_UNSET ? C.TIME_UNSET : rendererPositionUs - textOffsetUs;
+  }
+
+  @SideEffectFree
+  private long getRendererPositionUs(long subtitlePositionUs) {
+    return subtitlePositionUs == C.TIME_UNSET ? C.TIME_UNSET : subtitlePositionUs + textOffsetUs;
+  }
+
+  @Override
+  public void handleMessage(@MessageType int messageType, @Nullable Object message) throws ExoPlaybackException {
+    if (messageType == MSG_SET_TEXT_OFFSET) {
+      setTextOffsetMs((Long) checkNotNull(message));
+    } else {
+      super.handleMessage(messageType, message);
+    }
   }
 
   @RequiresNonNull("streamFormat")

@@ -17,6 +17,7 @@ package androidx.media3.exoplayer;
 
 import static androidx.media3.common.C.TRACK_TYPE_AUDIO;
 import static androidx.media3.common.C.TRACK_TYPE_IMAGE;
+import static androidx.media3.common.C.TRACK_TYPE_TEXT;
 import static androidx.media3.common.C.TRACK_TYPE_VIDEO;
 import static androidx.media3.exoplayer.Renderer.MSG_TRANSFER_RESOURCES;
 import static androidx.media3.exoplayer.Renderer.STATE_DISABLED;
@@ -865,6 +866,28 @@ import java.util.Objects;
     primaryRenderer.handleMessage(Renderer.MSG_SET_VOLUME, volume);
     if (secondaryRenderer != null) {
       secondaryRenderer.handleMessage(Renderer.MSG_SET_VOLUME, volume);
+    }
+  }
+
+  /** Sets the audio playback offset in milliseconds on the audio renderer. */
+  public void setAudioOffsetMs(long audioOffsetMs) throws ExoPlaybackException {
+    if (getTrackType() != TRACK_TYPE_AUDIO) {
+      return;
+    }
+    primaryRenderer.handleMessage(Renderer.MSG_SET_AUDIO_OFFSET, Long.valueOf(audioOffsetMs));
+    if (secondaryRenderer != null) {
+      secondaryRenderer.handleMessage(Renderer.MSG_SET_AUDIO_OFFSET, Long.valueOf(audioOffsetMs));
+    }
+  }
+
+  /** Sets the text display offset in milliseconds on the text renderer. */
+  public void setTextOffsetMs(long textOffsetMs) throws ExoPlaybackException {
+    if (getTrackType() != TRACK_TYPE_TEXT) {
+      return;
+    }
+    primaryRenderer.handleMessage(Renderer.MSG_SET_TEXT_OFFSET, Long.valueOf(textOffsetMs));
+    if (secondaryRenderer != null) {
+      secondaryRenderer.handleMessage(Renderer.MSG_SET_TEXT_OFFSET, Long.valueOf(textOffsetMs));
     }
   }
 

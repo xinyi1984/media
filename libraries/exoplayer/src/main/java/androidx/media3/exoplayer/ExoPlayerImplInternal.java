@@ -182,6 +182,8 @@ import java.util.Objects;
   private static final int MSG_SEEK_COMPLETED_IN_SCRUBBING_MODE = 37;
   private static final int MSG_SET_SCRUBBING_MODE_PARAMETERS = 38;
   private static final int MSG_SET_IMAGE_METADATA_LISTENER = 39;
+  private static final int MSG_SET_TEXT_OFFSET = 40;
+  private static final int MSG_SET_AUDIO_OFFSET = 41;
 
   private static final long BUFFERING_MAXIMUM_INTERVAL_MS =
       Util.usToMs(Renderer.DEFAULT_DURATION_TO_PROGRESS_US);
@@ -531,6 +533,14 @@ import java.util.Objects;
     handler.obtainMessage(MSG_SET_VOLUME, volume).sendToTarget();
   }
 
+  public void setAudioOffsetMs(long audioOffsetMs) {
+    handler.obtainMessage(MSG_SET_AUDIO_OFFSET, Long.valueOf(audioOffsetMs)).sendToTarget();
+  }
+
+  public void setTextOffsetMs(long textOffsetMs) {
+    handler.obtainMessage(MSG_SET_TEXT_OFFSET, Long.valueOf(textOffsetMs)).sendToTarget();
+  }
+
   private void handleAudioFocusPlayerCommandInternal(
       @AudioFocusManager.PlayerCommand int playerCommand) throws ExoPlaybackException {
     updatePlayWhenReadyWithAudioFocus(
@@ -821,6 +831,12 @@ import java.util.Objects;
         case MSG_SET_VOLUME:
           setVolumeInternal((Float) msg.obj);
           break;
+        case MSG_SET_AUDIO_OFFSET:
+          setAudioOffsetMsInternal((Long) checkNotNull(msg.obj));
+          break;
+        case MSG_SET_TEXT_OFFSET:
+          setTextOffsetMsInternal((Long) checkNotNull(msg.obj));
+          break;
         case MSG_AUDIO_FOCUS_PLAYER_COMMAND:
           handleAudioFocusPlayerCommandInternal(/* playerCommand= */ msg.arg1);
           break;
@@ -1081,6 +1097,18 @@ import java.util.Objects;
     float scaledVolume = volume * audioFocusManager.getVolumeMultiplier();
     for (RendererHolder renderer : renderers) {
       renderer.setVolume(scaledVolume);
+    }
+  }
+
+  private void setAudioOffsetMsInternal(long audioOffsetMs) throws ExoPlaybackException {
+    for (RendererHolder renderer : renderers) {
+      renderer.setAudioOffsetMs(audioOffsetMs);
+    }
+  }
+
+  private void setTextOffsetMsInternal(long textOffsetMs) throws ExoPlaybackException {
+    for (RendererHolder renderer : renderers) {
+      renderer.setTextOffsetMs(textOffsetMs);
     }
   }
 

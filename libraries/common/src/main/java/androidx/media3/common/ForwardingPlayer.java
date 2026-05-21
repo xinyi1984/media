@@ -713,6 +713,30 @@ public class ForwardingPlayer implements Player {
     return player.getVolume();
   }
 
+  /** Calls {@link Player#setAudioOffsetMs(long)} on the delegate. */
+  @Override
+  public void setAudioOffsetMs(long audioOffsetMs) {
+    player.setAudioOffsetMs(audioOffsetMs);
+  }
+
+  /** Calls {@link Player#getAudioOffsetMs()} on the delegate and returns the result. */
+  @Override
+  public long getAudioOffsetMs() {
+    return player.getAudioOffsetMs();
+  }
+
+  /** Calls {@link Player#setTextOffsetMs(long)} on the delegate. */
+  @Override
+  public void setTextOffsetMs(long textOffsetMs) {
+    player.setTextOffsetMs(textOffsetMs);
+  }
+
+  /** Calls {@link Player#getTextOffsetMs()} on the delegate and returns the result. */
+  @Override
+  public long getTextOffsetMs() {
+    return player.getTextOffsetMs();
+  }
+
   /** Calls {@link Player#mute()} on the delegate. */
   @Override
   public void mute() {
