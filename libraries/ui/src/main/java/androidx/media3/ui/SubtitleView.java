@@ -132,6 +132,9 @@ public final class SubtitleView extends FrameLayout {
   private Output output;
   private View innerSubtitleView;
 
+  private static final long BITMAP_CUE_CLEAR_DELAY_MS = 100;
+  @Nullable private Runnable pendingClearRunnable;
+
   public SubtitleView(Context context) {
     this(context, null);
   }
@@ -161,8 +164,48 @@ public final class SubtitleView extends FrameLayout {
    * @param cues The cues to display, or null to clear the cues.
    */
   public void setCues(@Nullable List<Cue> cues) {
-    this.cues = (cues != null ? cues : Collections.emptyList());
+    List<Cue> newCues = cues != null ? cues : Collections.emptyList();
+    if (newCues.isEmpty() && containsBitmap(this.cues)) {
+      if (pendingClearRunnable == null) {
+        scheduleBitmapCueClear();
+      }
+      return;
+    }
+    cancelPendingBitmapCueClear();
+    this.cues = newCues;
     updateOutput();
+  }
+
+  private boolean containsBitmap(List<Cue> cues) {
+    for (Cue cue : cues) {
+      if (cue.bitmap != null) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private void scheduleBitmapCueClear() {
+    postDelayed(pendingClearRunnable = this::onBitmapCueClearTimeout, BITMAP_CUE_CLEAR_DELAY_MS);
+  }
+
+  private void onBitmapCueClearTimeout() {
+    pendingClearRunnable = null;
+    cues = Collections.emptyList();
+    updateOutput();
+  }
+
+  private void cancelPendingBitmapCueClear() {
+    if (pendingClearRunnable != null) {
+      removeCallbacks(pendingClearRunnable);
+      pendingClearRunnable = null;
+    }
+  }
+
+  @Override
+  protected void onDetachedFromWindow() {
+    cancelPendingBitmapCueClear();
+    super.onDetachedFromWindow();
   }
 
   /**
