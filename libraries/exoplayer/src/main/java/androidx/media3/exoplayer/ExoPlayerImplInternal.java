@@ -55,6 +55,7 @@ import androidx.media3.common.Player.DiscontinuityReason;
 import androidx.media3.common.Player.PlaybackSuppressionReason;
 import androidx.media3.common.Player.RepeatMode;
 import androidx.media3.common.Timeline;
+import androidx.media3.common.TrackGroup;
 import androidx.media3.common.audio.AudioFocusManager;
 import androidx.media3.common.util.Clock;
 import androidx.media3.common.util.ConditionVariable;
@@ -3295,7 +3296,7 @@ import java.util.Objects;
           playingPeriodHolder == null
               ? emptyTrackSelectorResult
               : playingPeriodHolder.getTrackSelectorResult();
-      staticMetadata = extractMetadataFromTrackSelectionArray(trackSelectorResult.selections);
+      staticMetadata = extractMetadataFromTrackSelectionsOrGroups(trackSelectorResult.selections, trackGroupArray);
       // Ensure the media period queue requested content position matches the new playback info.
       if (playingPeriodHolder != null
           && playingPeriodHolder.info.requestedContentPositionUs != requestedContentPositionUs) {
@@ -3323,14 +3324,14 @@ import java.util.Objects;
         staticMetadata);
   }
 
-  private ImmutableList<Metadata> extractMetadataFromTrackSelectionArray(
-      ExoTrackSelection[] trackSelections) {
+  private ImmutableList<Metadata> extractMetadataFromTrackSelectionsOrGroups(
+      ExoTrackSelection[] trackSelections, TrackGroupArray trackGroupArray) {
     ImmutableList.Builder<Metadata> result = new ImmutableList.Builder<>();
     boolean seenNonEmptyMetadata = false;
     for (ExoTrackSelection trackSelection : trackSelections) {
       if (trackSelection != null) {
         Format format = trackSelection.getFormat(/* index= */ 0);
-        if (format.metadata == null) {
+        if (format.metadata == null || format.metadata.length() == 0) {
           result.add(new Metadata());
         } else {
           result.add(format.metadata);
@@ -3338,7 +3339,20 @@ import java.util.Objects;
         }
       }
     }
-    return seenNonEmptyMetadata ? result.build() : ImmutableList.of();
+    if (seenNonEmptyMetadata) {
+      return result.build();
+    }
+    for (int groupIndex = 0; groupIndex < trackGroupArray.length; groupIndex++) {
+      TrackGroup trackGroup = trackGroupArray.get(groupIndex);
+      for (int trackIndex = 0; trackIndex < trackGroup.length; trackIndex++) {
+        @Nullable Metadata metadata = trackGroup.getFormat(trackIndex).metadata;
+        if (metadata != null && metadata.length() > 0) {
+          result.add(metadata);
+          break;
+        }
+      }
+    }
+    return result.build();
   }
 
   private void enableRenderers() throws ExoPlaybackException {
