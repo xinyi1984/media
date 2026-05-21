@@ -15,9 +15,6 @@
  */
 package androidx.media3.extractor.text.pgs;
 
-import static java.lang.Math.min;
-
-import android.graphics.Bitmap;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
@@ -29,8 +26,8 @@ import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import androidx.media3.extractor.text.CuesWithTiming;
 import androidx.media3.extractor.text.SubtitleParser;
+import com.google.common.collect.ImmutableList;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.zip.Inflater;
 
 /** A {@link SubtitleParser} for PGS subtitles. */
@@ -47,22 +44,43 @@ public final class PgsParser implements SubtitleParser {
   private static final int SECTION_TYPE_PALETTE = 0x14;
   private static final int SECTION_TYPE_BITMAP_PICTURE = 0x15;
   private static final int SECTION_TYPE_IDENTIFIER = 0x16;
+  private static final int SECTION_TYPE_WINDOW_DEFINITION = 0x17;
   private static final int SECTION_TYPE_END = 0x80;
-
+  private static final int SUP_SEGMENT_MAGIC = 0x5047;
+  private static final int SUP_SEGMENT_HEADER_SIZE = 13;
   private final ParsableByteArray buffer;
   private final ParsableByteArray inflatedBuffer;
-  private final CueBuilder cueBuilder;
-  @Nullable private Inflater inflater;
+  private final PgsCueBuilder cueBuilder;
+  private final PgsSupSegment supSegment;
+  @Nullable
+  private Inflater inflater;
 
   public PgsParser() {
     buffer = new ParsableByteArray();
     inflatedBuffer = new ParsableByteArray();
-    cueBuilder = new CueBuilder();
+    cueBuilder = new PgsCueBuilder();
+    supSegment = new PgsSupSegment();
+  }
+
+  private static boolean isSupFileData(byte[] data, int offset, int length) {
+    return length >= SUP_SEGMENT_HEADER_SIZE && (((data[offset] & 0xFF) << 8) | (data[offset + 1] & 0xFF)) == SUP_SEGMENT_MAGIC;
+  }
+
+  private static long getDisplaySetStartTimeUs(long currentStartTimeUs, PgsSupSegment segment) {
+    if (currentStartTimeUs == C.TIME_UNSET || segment.sectionType == SECTION_TYPE_IDENTIFIER) {
+      return segment.ptsUs;
+    }
+    return currentStartTimeUs;
   }
 
   @Override
   public @CueReplacementBehavior int getCueReplacementBehavior() {
     return CUE_REPLACEMENT_BEHAVIOR;
+  }
+
+  @Override
+  public void reset() {
+    cueBuilder.reset();
   }
 
   @Override
@@ -72,6 +90,10 @@ public final class PgsParser implements SubtitleParser {
       int length,
       OutputOptions outputOptions,
       Consumer<CuesWithTiming> output) {
+    if (isSupFileData(data, offset, length)) {
+      parseSupFile(data, offset, length, outputOptions, output);
+      return;
+    }
     buffer.reset(data, /* limit= */ offset + length);
     buffer.setPosition(offset);
     if (inflater == null) {
@@ -80,31 +102,91 @@ public final class PgsParser implements SubtitleParser {
     if (Util.maybeInflate(buffer, inflatedBuffer, inflater)) {
       buffer.reset(inflatedBuffer.getData(), inflatedBuffer.limit());
     }
-    cueBuilder.reset();
     ArrayList<Cue> cues = new ArrayList<>();
+    boolean sawClearDisplaySet = false;
     while (buffer.bytesLeft() >= 3) {
-      Cue cue = readNextSection(buffer, cueBuilder);
-      if (cue != null) {
-        cues.add(cue);
+      int limit = buffer.limit();
+      int sectionType = buffer.readUnsignedByte();
+      int sectionLength = buffer.readUnsignedShort();
+      int nextSectionPosition = buffer.getPosition() + sectionLength;
+      if (nextSectionPosition > limit) {
+        buffer.setPosition(limit);
+        break;
       }
+      if (sectionType == SECTION_TYPE_END) {
+        cueBuilder.build(cues);
+        sawClearDisplaySet |= cueBuilder.isClearDisplaySet();
+        cueBuilder.clearPresentation();
+      } else {
+        parsePresentationSection(sectionType, sectionLength);
+      }
+      buffer.setPosition(nextSectionPosition);
     }
-    output.accept(
-        new CuesWithTiming(cues, /* startTimeUs= */ C.TIME_UNSET, /* durationUs= */ C.TIME_UNSET));
+    if (!cues.isEmpty()) {
+      output.accept(
+          new CuesWithTiming(cues, /* startTimeUs= */ C.TIME_UNSET, /* durationUs= */ C.TIME_UNSET));
+    } else if (sawClearDisplaySet) {
+      output.accept(
+          new CuesWithTiming(
+              ImmutableList.of(), /* startTimeUs= */ C.TIME_UNSET, /* durationUs= */ C.TIME_UNSET));
+    }
   }
 
-  @Nullable
-  private static Cue readNextSection(ParsableByteArray buffer, CueBuilder cueBuilder) {
-    int limit = buffer.limit();
+  private void parseSupFile(byte[] data, int offset, int length, OutputOptions outputOptions, Consumer<CuesWithTiming> output) {
+    buffer.reset(data, /* limit= */ offset + length);
+    buffer.setPosition(offset);
+    cueBuilder.reset();
+    PgsSupTiming timing = new PgsSupTiming(outputOptions, output);
+    ArrayList<Cue> displaySetCues = new ArrayList<>();
+    long displaySetStartTimeUs = C.TIME_UNSET;
+    while (buffer.bytesLeft() >= SUP_SEGMENT_HEADER_SIZE) {
+      if (!readSupSegment(supSegment)) {
+        break;
+      }
+      displaySetStartTimeUs = getDisplaySetStartTimeUs(displaySetStartTimeUs, supSegment);
+      if (supSegment.sectionType == SECTION_TYPE_END) {
+        handleSupDisplaySetEnd(timing, displaySetCues, displaySetStartTimeUs);
+        displaySetStartTimeUs = C.TIME_UNSET;
+      } else {
+        parsePresentationSection(supSegment.sectionType, supSegment.sectionLength);
+      }
+      buffer.setPosition(supSegment.nextSectionPosition);
+    }
+    timing.finish();
+  }
+
+  private void handleSupDisplaySetEnd(PgsSupTiming timing, ArrayList<Cue> displaySetCues, long displaySetStartTimeUs) {
+    displaySetCues.clear();
+    cueBuilder.build(displaySetCues);
+    boolean isClearDisplaySet = cueBuilder.isClearDisplaySet();
+    cueBuilder.clearPresentation();
+    if (isClearDisplaySet) {
+      timing.onClearDisplaySet(displaySetStartTimeUs);
+    } else if (!displaySetCues.isEmpty()) {
+      timing.onDisplaySet(displaySetCues, displaySetStartTimeUs);
+    }
+  }
+
+  private boolean readSupSegment(PgsSupSegment segment) {
+    if (buffer.readUnsignedShort() != SUP_SEGMENT_MAGIC) {
+      segment.clear();
+      return false;
+    }
+    long ptsUs = Util.scaleLargeTimestamp(buffer.readUnsignedInt(), C.MICROS_PER_SECOND, 90000);
+    buffer.skipBytes(4);
     int sectionType = buffer.readUnsignedByte();
     int sectionLength = buffer.readUnsignedShort();
-
     int nextSectionPosition = buffer.getPosition() + sectionLength;
-    if (nextSectionPosition > limit) {
-      buffer.setPosition(limit);
-      return null;
+    if (nextSectionPosition > buffer.limit()) {
+      buffer.setPosition(buffer.limit());
+      segment.clear();
+      return false;
     }
+    segment.set(ptsUs, sectionType, sectionLength, nextSectionPosition);
+    return true;
+  }
 
-    Cue cue = null;
+  private void parsePresentationSection(int sectionType, int sectionLength) {
     switch (sectionType) {
       case SECTION_TYPE_PALETTE:
         cueBuilder.parsePaletteSection(buffer, sectionLength);
@@ -115,162 +197,11 @@ public final class PgsParser implements SubtitleParser {
       case SECTION_TYPE_IDENTIFIER:
         cueBuilder.parseIdentifierSection(buffer, sectionLength);
         break;
-      case SECTION_TYPE_END:
-        cue = cueBuilder.build();
-        cueBuilder.reset();
+      case SECTION_TYPE_WINDOW_DEFINITION:
+        cueBuilder.parseWindowDefinitionSection(buffer, sectionLength);
         break;
       default:
         break;
-    }
-
-    buffer.setPosition(nextSectionPosition);
-    return cue;
-  }
-
-  private static final class CueBuilder {
-
-    private final ParsableByteArray bitmapData;
-    private final int[] colors;
-
-    private boolean colorsSet;
-    private int planeWidth;
-    private int planeHeight;
-    private int bitmapX;
-    private int bitmapY;
-    private int bitmapWidth;
-    private int bitmapHeight;
-
-    public CueBuilder() {
-      bitmapData = new ParsableByteArray();
-      colors = new int[256];
-    }
-
-    private void parsePaletteSection(ParsableByteArray buffer, int sectionLength) {
-      if ((sectionLength % 5) != 2) {
-        // Section must be two bytes then a whole number of (index, Y, Cr, Cb, alpha) entries.
-        return;
-      }
-      buffer.skipBytes(2);
-
-      Arrays.fill(colors, 0);
-      int entryCount = sectionLength / 5;
-      for (int i = 0; i < entryCount; i++) {
-        int index = buffer.readUnsignedByte();
-        int y = buffer.readUnsignedByte();
-        int cr = buffer.readUnsignedByte();
-        int cb = buffer.readUnsignedByte();
-        int a = buffer.readUnsignedByte();
-        int r = (int) (y + (1.40200 * (cr - 128)));
-        int g = (int) (y - (0.34414 * (cb - 128)) - (0.71414 * (cr - 128)));
-        int b = (int) (y + (1.77200 * (cb - 128)));
-        colors[index] =
-            (a << 24)
-                | (Util.constrainValue(r, 0, 255) << 16)
-                | (Util.constrainValue(g, 0, 255) << 8)
-                | Util.constrainValue(b, 0, 255);
-      }
-      colorsSet = true;
-    }
-
-    private void parseBitmapSection(ParsableByteArray buffer, int sectionLength) {
-      if (sectionLength < 4) {
-        return;
-      }
-      buffer.skipBytes(3); // Id (2 bytes), version (1 byte).
-      boolean isBaseSection = (0x80 & buffer.readUnsignedByte()) != 0;
-      sectionLength -= 4;
-
-      if (isBaseSection) {
-        if (sectionLength < 7) {
-          return;
-        }
-        int totalLength = buffer.readUnsignedInt24();
-        if (totalLength < 4) {
-          return;
-        }
-        bitmapWidth = buffer.readUnsignedShort();
-        bitmapHeight = buffer.readUnsignedShort();
-        bitmapData.reset(totalLength - 4);
-        sectionLength -= 7;
-      }
-
-      int position = bitmapData.getPosition();
-      int limit = bitmapData.limit();
-      if (position < limit && sectionLength > 0) {
-        int bytesToRead = min(sectionLength, limit - position);
-        buffer.readBytes(bitmapData.getData(), position, bytesToRead);
-        bitmapData.setPosition(position + bytesToRead);
-      }
-    }
-
-    private void parseIdentifierSection(ParsableByteArray buffer, int sectionLength) {
-      if (sectionLength < 19) {
-        return;
-      }
-      planeWidth = buffer.readUnsignedShort();
-      planeHeight = buffer.readUnsignedShort();
-      buffer.skipBytes(11);
-      bitmapX = buffer.readUnsignedShort();
-      bitmapY = buffer.readUnsignedShort();
-    }
-
-    @Nullable
-    public Cue build() {
-      if (planeWidth == 0
-          || planeHeight == 0
-          || bitmapWidth == 0
-          || bitmapHeight == 0
-          || bitmapData.limit() == 0
-          || bitmapData.getPosition() != bitmapData.limit()
-          || !colorsSet) {
-        return null;
-      }
-      // Build the bitmapData.
-      bitmapData.setPosition(0);
-      int[] argbBitmapData = new int[bitmapWidth * bitmapHeight];
-      int argbBitmapDataIndex = 0;
-      while (argbBitmapDataIndex < argbBitmapData.length) {
-        int colorIndex = bitmapData.readUnsignedByte();
-        if (colorIndex != 0) {
-          argbBitmapData[argbBitmapDataIndex++] = colors[colorIndex];
-        } else {
-          int switchBits = bitmapData.readUnsignedByte();
-          if (switchBits != 0) {
-            int runLength =
-                (switchBits & 0x40) == 0
-                    ? (switchBits & 0x3F)
-                    : (((switchBits & 0x3F) << 8) | bitmapData.readUnsignedByte());
-            int color =
-                (switchBits & 0x80) == 0 ? colors[0] : colors[bitmapData.readUnsignedByte()];
-            Arrays.fill(
-                argbBitmapData, argbBitmapDataIndex, argbBitmapDataIndex + runLength, color);
-            argbBitmapDataIndex += runLength;
-          }
-        }
-      }
-      Bitmap bitmap =
-          Bitmap.createBitmap(argbBitmapData, bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888);
-      // Build the cue.
-      return new Cue.Builder()
-          .setBitmap(bitmap)
-          .setPosition((float) bitmapX / planeWidth)
-          .setPositionAnchor(Cue.ANCHOR_TYPE_START)
-          .setLine((float) bitmapY / planeHeight, Cue.LINE_TYPE_FRACTION)
-          .setLineAnchor(Cue.ANCHOR_TYPE_START)
-          .setSize((float) bitmapWidth / planeWidth)
-          .setBitmapHeight((float) bitmapHeight / planeHeight)
-          .build();
-    }
-
-    public void reset() {
-      planeWidth = 0;
-      planeHeight = 0;
-      bitmapX = 0;
-      bitmapY = 0;
-      bitmapWidth = 0;
-      bitmapHeight = 0;
-      bitmapData.reset(0);
-      colorsSet = false;
     }
   }
 }
