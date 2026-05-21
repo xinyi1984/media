@@ -683,6 +683,13 @@ public class SampleQueue implements TrackOutput {
     timeUs += sampleOffsetUs;
     if (discardAllSamplesToStartTime) {
       if (timeUs < startTimeUs) {
+        if ((flags & C.BUFFER_FLAG_LAST_SAMPLE) != 0) {
+          // Track ended before start time (e.g. audio shorter than video). Signal EOS so the
+          // renderer doesn't wait for loading to finish.
+          synchronized (this) {
+            isLastSampleQueued = true;
+          }
+        }
         return;
       }
       if ((flags & C.BUFFER_FLAG_KEY_FRAME) == 0) {
