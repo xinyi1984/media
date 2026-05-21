@@ -349,6 +349,21 @@ public final class DtsReader implements ElementaryStreamReader {
   }
 
   /**
+   * Sets the {@link TrackOutput} to receive DTS samples, along with a format ID.
+   *
+   * <p>This is an alternative to {@link #createTracks(ExtractorOutput, TrackIdGenerator)}, for use
+   * when the track output is managed externally (e.g. by {@link
+   * androidx.media3.extractor.wav.WavExtractor}).
+   *
+   * @param trackOutput The track output to receive samples.
+   * @param formatId The format identifier.
+   */
+  public void setTrackOutput(TrackOutput trackOutput, String formatId) {
+    this.formatId = formatId;
+    this.output = trackOutput;
+  }
+
+  /**
    * Continues a read from the provided {@code source} into a given {@code target}. It's assumed
    * that the data should be written into {@code target} starting from an offset of zero.
    *

@@ -203,6 +203,12 @@ public final class DtsUtil {
   private static final int SYNC_VALUE_UHD_FTOC_NONSYNC_BE = 0x71C442E8;
   private static final int SYNC_VALUE_UHD_FTOC_NONSYNC_LE = 0xE842C471;
 
+  private static final int DCA_EXSS_LBR = 0x100;
+  private static final int DCA_EXSS_XLL = 0x200;
+
+  private static final int DCA_SYNCWORD_XLL_X = 0x02000850;
+  private static final int DCA_SYNCWORD_XLL_X_IMAX_SHIFTED = 0xF14000D0 >>> 1;
+
   private static final byte FIRST_BYTE_BE = (byte) (SYNC_VALUE_BE >>> 24);
   private static final byte FIRST_BYTE_14B_BE = (byte) (SYNC_VALUE_14B_BE >>> 24);
   private static final byte FIRST_BYTE_LE = (byte) (SYNC_VALUE_LE >>> 24);
@@ -420,7 +426,7 @@ public final class DtsUtil {
     }
 
     // If the frame is stored in 14-bit mode, adjust the frame size to reflect the actual byte size.
-    return uses14BitPerWord ? fsize * 16 / 14 : fsize;
+    return uses14BitPerWord ? (fsize >> 1 << 1) * 16 / 14 : fsize;
   }
 
   /**
@@ -1041,6 +1047,61 @@ public final class DtsUtil {
         || frameHeader[0] == FIRST_BYTE_EXTSS_LE
         || frameHeader[0] == FIRST_BYTE_UHD_FTOC_SYNC_LE
         || frameHeader[0] == FIRST_BYTE_UHD_FTOC_NONSYNC_LE;
+  }
+
+
+
+  public static boolean containsXllXSyncWord(byte[] data, int offset, int length) {
+    int end = offset + length - 3;
+    for (int i = offset; i < end; i++) {
+      int word = ((data[i] & 0xFF) << 24) | ((data[i + 1] & 0xFF) << 16) | ((data[i + 2] & 0xFF) << 8) | (data[i + 3] & 0xFF);
+      if (matchesXllXSyncWord(word)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  public static boolean matchesXllXSyncWord(int word) {
+    return word == DCA_SYNCWORD_XLL_X || (word >>> 1) == DCA_SYNCWORD_XLL_X_IMAX_SHIFTED;
+  }
+
+  public static int readSyncWord(byte[] data) {
+    return ((data[0] & 0xFF) << 24) | ((data[1] & 0xFF) << 16) | ((data[2] & 0xFF) << 8) | (data[3] & 0xFF);
+  }
+
+  public static int parseDtsHdFrameSize(byte[] header) {
+    ParsableBitArray bits = getNormalizedFrame(header);
+    bits.skipBits(32 + 8 + 2);
+    boolean longHeader = bits.readBit();
+    bits.skipBits(longHeader ? 12 : 8);
+    return bits.readBits(longHeader ? 20 : 16) + 1;
+  }
+
+  public static boolean isRiffContainer(ExtractorInput input) throws IOException {
+    byte[] header = new byte[4];
+    input.peekFully(header, 0, 4);
+    input.resetPeekPosition();
+    return header[0] == 0x52 && header[1] == 0x49 && header[2] == 0x46 && header[3] == 0x46;
+  }
+
+  public static int findDtsCoreSync(ExtractorInput input, int maxBytesToSearch) throws IOException {
+    byte[] scratch = new byte[4];
+    input.peekFully(scratch, 0, 2);
+    int bytesSniffed = 2;
+    maxBytesToSearch -= 2;
+    while (maxBytesToSearch >= 2) {
+      input.peekFully(scratch, 2, 2);
+      bytesSniffed += 2;
+      maxBytesToSearch -= 2;
+      int word = readSyncWord(scratch);
+      if (getFrameType(word) == FRAME_TYPE_CORE) {
+        return bytesSniffed - 4;
+      }
+      scratch[0] = scratch[2];
+      scratch[1] = scratch[3];
+    }
+    return -1;
   }
 
   private DtsUtil() {}
