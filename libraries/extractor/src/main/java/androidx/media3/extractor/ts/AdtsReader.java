@@ -51,6 +51,7 @@ public final class AdtsReader implements ElementaryStreamReader {
   private static final int STATE_READING_ID3_HEADER = 2;
   private static final int STATE_READING_ADTS_HEADER = 3;
   private static final int STATE_READING_SAMPLE = 4;
+  private static final int STATE_READING_AAC_PCE = 5;
 
   private static final int HEADER_SIZE = 5;
   private static final int CRC_SIZE = 2;
@@ -66,6 +67,9 @@ public final class AdtsReader implements ElementaryStreamReader {
   private static final int ID3_SIZE_OFFSET = 6;
   private static final byte[] ID3_IDENTIFIER = {'I', 'D', '3'};
   private static final int VERSION_UNSET = -1;
+
+  private static final int AAC_PCE_MIN_SIZE = 6;
+  private static final int AAC_PCE_MAX_SIZE = 320;
 
   private final boolean exposeId3;
   private final ParsableBitArray adtsScratch;
@@ -101,7 +105,22 @@ public final class AdtsReader implements ElementaryStreamReader {
   private long timeUs;
 
   private @MonotonicNonNull TrackOutput currentOutput;
+  @Nullable private ParsableBitArray pceBuffer;
+  @Nullable private Format pendingOutputFormat;
   private long currentSampleDuration;
+
+  private static final class AacPce {
+
+    public final byte[] data;
+    public final int byteLength;
+    public final int channelCount;
+
+    public AacPce(byte[] data, int byteLength, int channelCount) {
+      this.data = data;
+      this.byteLength = byteLength;
+      this.channelCount = channelCount;
+    }
+  }
 
   /**
    * @param exposeId3 True if the reader should expose ID3 information.
@@ -193,6 +212,12 @@ public final class AdtsReader implements ElementaryStreamReader {
             parseAdtsHeader();
           }
           break;
+        case STATE_READING_AAC_PCE:
+          checkNotNull(pceBuffer);
+          if (continueRead(data, pceBuffer.data, pceBuffer.data.length)) {
+            readAacProgramConfigElement();
+          }
+          break;
         case STATE_READING_SAMPLE:
           readSample(data);
           break;
@@ -211,6 +236,8 @@ public final class AdtsReader implements ElementaryStreamReader {
   }
 
   private void resetSync() {
+    pceBuffer = null;
+    pendingOutputFormat = null;
     foundFirstFrame = false;
     setFindingSampleState();
   }
@@ -276,6 +303,15 @@ public final class AdtsReader implements ElementaryStreamReader {
   private void setCheckingAdtsHeaderState() {
     state = STATE_CHECKING_ADTS_HEADER;
     bytesRead = 0;
+  }
+
+  private void setReadingAacPceState(TrackOutput outputToUse, long currentSampleDuration, int sampleSize) {
+    state = STATE_READING_AAC_PCE;
+    bytesRead = 0;
+    this.currentOutput = outputToUse;
+    this.currentSampleDuration = currentSampleDuration;
+    this.sampleSize = sampleSize;
+    pceBuffer = new ParsableBitArray(new byte[min(sampleSize, AAC_PCE_MAX_SIZE)]);
   }
 
   /**
@@ -523,8 +559,12 @@ public final class AdtsReader implements ElementaryStreamReader {
       // In this class a sample is an access unit, but the MediaFormat sample rate specifies the
       // number of PCM audio samples per second.
       sampleDurationUs = (C.MICROS_PER_SECOND * 1024) / format.sampleRate;
-      output.format(format);
-      hasOutputFormat = true;
+      if (channelConfig == 0) {
+        pendingOutputFormat = format;
+      } else {
+        output.format(format);
+        hasOutputFormat = true;
+      }
     } else {
       adtsScratch.skipBits(10);
     }
@@ -534,8 +574,118 @@ public final class AdtsReader implements ElementaryStreamReader {
     if (hasCrc) {
       sampleSize -= CRC_SIZE;
     }
+    if (sampleSize < 0) {
+      resetSync();
+      return;
+    }
+    if (pendingOutputFormat != null && sampleSize >= AAC_PCE_MIN_SIZE) {
+      setReadingAacPceState(output, sampleDurationUs, sampleSize);
+    } else {
+      if (pendingOutputFormat != null) {
+        output.format(pendingOutputFormat);
+        hasOutputFormat = true;
+        pendingOutputFormat = null;
+      }
+      setReadingSampleState(output, sampleDurationUs, 0, sampleSize);
+    }
+  }
 
-    setReadingSampleState(output, sampleDurationUs, 0, sampleSize);
+  @RequiresNonNull("currentOutput")
+  private void readAacProgramConfigElement() throws ParserException {
+    ParsableBitArray pceBuffer = checkNotNull(this.pceBuffer);
+    boolean foundPce = readBits(pceBuffer, 3) == 5;
+    if (foundPce) {
+      AacPce pce = parseAacProgramConfigElement(pceBuffer);
+      Format pendingOutputFormat = checkNotNull(this.pendingOutputFormat);
+      byte[] oldConfig = pendingOutputFormat.initializationData.get(0);
+      byte[] newConfig = Arrays.copyOf(oldConfig, oldConfig.length + pce.byteLength);
+      System.arraycopy(pce.data, 0, newConfig, oldConfig.length, pce.byteLength);
+      Format.Builder builder = pendingOutputFormat.buildUpon().setInitializationData(Collections.singletonList(newConfig));
+      if (pce.channelCount > 0) {
+        builder.setChannelCount(pce.channelCount);
+      }
+      pendingOutputFormat = builder.build();
+      this.currentOutput.format(pendingOutputFormat);
+      this.hasOutputFormat = true;
+    } else if (this.pendingOutputFormat != null) {
+      this.currentOutput.format(this.pendingOutputFormat);
+      this.hasOutputFormat = true;
+    }
+    if (this.hasOutputFormat) {
+      ParsableByteArray data = new ParsableByteArray(pceBuffer.data);
+      setReadingSampleState(currentOutput, currentSampleDuration, 0, sampleSize);
+      readSample(data);
+    } else {
+      setFindingSampleState();
+    }
+    this.pendingOutputFormat = null;
+    this.pceBuffer = null;
+  }
+
+  private static AacPce parseAacProgramConfigElement(ParsableBitArray input) throws ParserException {
+    byte[] data = new byte[AAC_PCE_MAX_SIZE];
+    ParsableBitArray output = new ParsableBitArray(data);
+    copyBits(input, output, 10);
+    int numFront = copyBits(input, output, 4);
+    int numSide = copyBits(input, output, 4);
+    int numBack = copyBits(input, output, 4);
+    int numLfe = copyBits(input, output, 2);
+    int numAssoc = copyBits(input, output, 3);
+    int numCc = copyBits(input, output, 4);
+    if (copyBits(input, output, 1) == 1) {
+      copyBits(input, output, 4);
+    }
+    if (copyBits(input, output, 1) == 1) {
+      copyBits(input, output, 4);
+    }
+    if (copyBits(input, output, 1) == 1) {
+      copyBits(input, output, 3);
+    }
+    int channelCount = 0;
+    for (int i = 0; i < numFront + numSide + numBack; i++) {
+      channelCount += copyBits(input, output, 1) == 1 ? 2 : 1;
+      copyBits(input, output, 4);
+    }
+    for (int i = 0; i < numLfe; i++) {
+      channelCount++;
+      copyBits(input, output, 4);
+    }
+    copyBits(input, output, numAssoc * 4);
+    copyBits(input, output, numCc * 5);
+    byteAlign(input);
+    output.byteAlign();
+    int commentFieldBytes = copyBits(input, output, 8);
+    copyBits(input, output, commentFieldBytes * 8);
+    return new AacPce(data, (output.getPosition() + 7) / 8, channelCount);
+  }
+
+  private static int copyBits(ParsableBitArray input, ParsableBitArray output, int bitCount) throws ParserException {
+    int value = 0;
+    int bitsLeft = bitCount;
+    while (bitsLeft > 0) {
+      int bitsToCopy = min(bitsLeft, 31);
+      value = readBits(input, bitsToCopy);
+      if (output.bitsLeft() < bitsToCopy) {
+        throw ParserException.createForMalformedContainer(/* message= */ null, /* cause= */ null);
+      }
+      output.putInt(value, bitsToCopy);
+      bitsLeft -= bitsToCopy;
+    }
+    return value;
+  }
+
+  private static int readBits(ParsableBitArray input, int bitCount) throws ParserException {
+    if (input.bitsLeft() < bitCount) {
+      throw ParserException.createForMalformedContainer(/* message= */ null, /* cause= */ null);
+    }
+    return input.readBits(bitCount);
+  }
+
+  private static void byteAlign(ParsableBitArray input) throws ParserException {
+    int paddingBits = (8 - input.getPosition() % 8) % 8;
+    if (paddingBits > 0) {
+      readBits(input, paddingBits);
+    }
   }
 
   /** Reads the rest of the sample */
