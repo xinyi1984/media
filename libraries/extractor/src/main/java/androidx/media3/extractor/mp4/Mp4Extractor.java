@@ -184,6 +184,9 @@ public final class Mp4Extractor implements Extractor {
   /** The maximum duration to scan for a thumbnail, in microseconds. */
   private static final long MAX_DURATION_US_TO_SCAN_FOR_THUMBNAIL = 10_000_000L;
 
+  /** Tolerance for comparing declared and sample table durations, in microseconds. */
+  private static final long DURATION_COMPARISON_TOLERANCE_US = 1_000L;
+
   /**
    * @deprecated Use {@link #newFactory(SubtitleParser.Factory)} instead.
    */
@@ -673,6 +676,11 @@ public final class Mp4Extractor implements Extractor {
           new Mp4Track(track, trackSampleTable, extractorOutput.track(trackIndex++, track.type));
       long trackDurationUs =
           track.durationUs != C.TIME_UNSET ? track.durationUs : trackSampleTable.durationUs;
+      if (track.type == C.TRACK_TYPE_AUDIO
+          && trackSampleTable.durationUs != C.TIME_UNSET
+          && trackSampleTable.durationUs + DURATION_COMPARISON_TOLERANCE_US < trackDurationUs) {
+        trackDurationUs = trackSampleTable.durationUs;
+      }
       mp4Track.trackOutput.durationUs(trackDurationUs);
       durationUs = max(durationUs, trackDurationUs);
 
