@@ -72,7 +72,8 @@ public final class SubtitleView extends FrameLayout {
         CaptionStyleCompat style,
         float defaultTextSize,
         @Cue.TextSizeType int defaultTextSizeType,
-        float bottomPaddingFraction);
+        float bottomPaddingFraction,
+        float bottomPosition);
   }
 
   /**
@@ -121,7 +122,9 @@ public final class SubtitleView extends FrameLayout {
   private CaptionStyleCompat style;
   private @Cue.TextSizeType int defaultTextSizeType;
   private float defaultTextSize;
+  private float bitmapSizeScale;
   private float bottomPaddingFraction;
+  private float bottomPosition;
   private boolean applyEmbeddedStyles;
   private boolean applyEmbeddedFontSizes;
 
@@ -142,6 +145,8 @@ public final class SubtitleView extends FrameLayout {
     bottomPaddingFraction = DEFAULT_BOTTOM_PADDING_FRACTION;
     applyEmbeddedStyles = true;
     applyEmbeddedFontSizes = true;
+    bitmapSizeScale = 1.0f;
+    bottomPosition = 0;
 
     CanvasSubtitleOutput canvasSubtitleOutput = new CanvasSubtitleOutput(context);
     output = canvasSubtitleOutput;
@@ -317,6 +322,11 @@ public final class SubtitleView extends FrameLayout {
     updateOutput();
   }
 
+  public void setBottomPosition(float bottomPosition) {
+    this.bottomPosition = bottomPosition;
+    updateOutput();
+  }
+
   private float getUserCaptionFontScale() {
     if (isInEditMode()) {
       return 1f;
@@ -347,7 +357,8 @@ public final class SubtitleView extends FrameLayout {
         style,
         defaultTextSize,
         defaultTextSizeType,
-        bottomPaddingFraction);
+        bottomPaddingFraction,
+        bottomPosition);
   }
 
   /**
@@ -363,14 +374,34 @@ public final class SubtitleView extends FrameLayout {
    * to {@link Cue#DIMEN_UNSET}
    */
   private List<Cue> getCuesWithStylingPreferencesApplied() {
-    if (applyEmbeddedStyles && applyEmbeddedFontSizes) {
+    boolean scaleBitmap = bitmapSizeScale != 1.0f;
+    if (applyEmbeddedStyles && applyEmbeddedFontSizes && !scaleBitmap) {
       return cues;
     }
     List<Cue> strippedCues = new ArrayList<>(cues.size());
     for (int i = 0; i < cues.size(); i++) {
-      strippedCues.add(removeEmbeddedStyling(cues.get(i)));
+      Cue cue = cues.get(i);
+      if (scaleBitmap) cue = scaleBitmapCue(cue);
+      strippedCues.add(removeEmbeddedStyling(cue));
     }
     return strippedCues;
+  }
+
+  private Cue scaleBitmapCue(Cue cue) {
+    if (cue.bitmap == null || cue.size == Cue.DIMEN_UNSET) {
+      return cue;
+    }
+    float scaledSize = cue.size * bitmapSizeScale;
+    Cue.Builder builder = cue.buildUpon().setSize(scaledSize);
+    if (cue.position != Cue.DIMEN_UNSET) {
+      float offset = (cue.size - scaledSize) / 2.0f;
+      if (cue.positionAnchor == Cue.ANCHOR_TYPE_START) {
+        builder.setPosition(cue.position + offset);
+      } else if (cue.positionAnchor == Cue.ANCHOR_TYPE_END) {
+        builder.setPosition(cue.position - offset);
+      }
+    }
+    return builder.build();
   }
 
   private Cue removeEmbeddedStyling(Cue cue) {
@@ -381,5 +412,42 @@ public final class SubtitleView extends FrameLayout {
       SubtitleViewUtils.removeEmbeddedFontSizes(strippedCue);
     }
     return strippedCue.build();
+  }
+
+  public float getTextSize() {
+    return defaultTextSize;
+  }
+
+  public void addTextSize(float value) {
+    defaultTextSize += value;
+    bitmapSizeScale = defaultTextSize / DEFAULT_TEXT_SIZE_FRACTION;
+    updateOutput();
+  }
+
+  public void subTextSize(float value) {
+    defaultTextSize -= value;
+    bitmapSizeScale = defaultTextSize / DEFAULT_TEXT_SIZE_FRACTION;
+    updateOutput();
+  }
+
+  public float getPosition() {
+    return bottomPosition;
+  }
+
+  public void addPosition(float value) {
+    bottomPosition += value;
+    updateOutput();
+  }
+
+  public void subPosition(float value) {
+    bottomPosition -= value;
+    updateOutput();
+  }
+
+  public void reset() {
+    defaultTextSize = DEFAULT_TEXT_SIZE_FRACTION;
+    bitmapSizeScale = 1.0f;
+    bottomPosition = 0;
+    updateOutput();
   }
 }
