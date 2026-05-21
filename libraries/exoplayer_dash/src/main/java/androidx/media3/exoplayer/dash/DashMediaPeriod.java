@@ -447,12 +447,33 @@ import java.util.regex.Pattern;
     int[] streamIndexToTrackGroupIndex = new int[selections.length];
     for (int i = 0; i < selections.length; i++) {
       if (selections[i] != null) {
-        streamIndexToTrackGroupIndex[i] = trackGroups.indexOf(selections[i].getTrackGroup());
+        streamIndexToTrackGroupIndex[i] = getTrackGroupIndex(selections[i].getTrackGroup());
       } else {
         streamIndexToTrackGroupIndex[i] = C.INDEX_UNSET;
       }
     }
     return streamIndexToTrackGroupIndex;
+  }
+
+  private int getTrackGroupIndex(TrackGroup trackGroup) {
+    int trackGroupIndex = trackGroups.indexOf(trackGroup);
+    if (trackGroupIndex != C.INDEX_UNSET) {
+      return trackGroupIndex;
+    }
+    String formatId = trackGroup.getFormat(0).id;
+    if (formatId == null) {
+      return C.INDEX_UNSET;
+    }
+    for (int i = 0; i < trackGroups.length; i++) {
+      TrackGroup candidateTrackGroup = trackGroups.get(i);
+      if (candidateTrackGroup.type == trackGroup.type && Objects.equals(candidateTrackGroup.getFormat(0).id, formatId)) {
+        if (trackGroupIndex != C.INDEX_UNSET) {
+          return C.INDEX_UNSET;
+        }
+        trackGroupIndex = i;
+      }
+    }
+    return trackGroupIndex;
   }
 
   private void releaseDisabledStreams(
