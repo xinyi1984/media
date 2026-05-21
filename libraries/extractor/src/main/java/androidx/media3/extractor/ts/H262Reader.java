@@ -52,6 +52,7 @@ public final class H262Reader implements ElementaryStreamReader {
 
   @Nullable private final UserDataReader userDataReader;
   private final String containerMimeType;
+  private final String sampleMimeType;
   @Nullable private final ParsableByteArray userDataParsable;
 
   // State that should be reset on seek.
@@ -75,12 +76,22 @@ public final class H262Reader implements ElementaryStreamReader {
   private boolean sampleHasPicture;
 
   public H262Reader(String containerMimeType) {
-    this(null, containerMimeType);
+    this(null, containerMimeType, MimeTypes.VIDEO_MPEG2);
+  }
+
+  /* package */ H262Reader(String containerMimeType, String sampleMimeType) {
+    this(null, containerMimeType, sampleMimeType);
   }
 
   /* package */ H262Reader(@Nullable UserDataReader userDataReader, String containerMimeType) {
+    this(userDataReader, containerMimeType, MimeTypes.VIDEO_MPEG2);
+  }
+
+  /* package */ H262Reader(
+      @Nullable UserDataReader userDataReader, String containerMimeType, String sampleMimeType) {
     this.userDataReader = userDataReader;
     this.containerMimeType = containerMimeType;
+    this.sampleMimeType = sampleMimeType;
     prefixFlags = new boolean[4];
     csdBuffer = new CsdBuffer(128);
     if (userDataReader != null) {
@@ -165,7 +176,7 @@ public final class H262Reader implements ElementaryStreamReader {
         if (csdBuffer.onStartCode(startCodeValue, bytesAlreadyPassed)) {
           // The csd data is complete, so we can decode and output the media format.
           Pair<Format, Long> result =
-              parseCsdBuffer(csdBuffer, checkNotNull(formatId), containerMimeType);
+              parseCsdBuffer(csdBuffer, checkNotNull(formatId), containerMimeType, sampleMimeType);
           output.format(result.first);
           frameDurationUs = result.second;
           hasOutputFormat = true;
@@ -240,7 +251,7 @@ public final class H262Reader implements ElementaryStreamReader {
    *     the duration could not be determined.
    */
   private static Pair<Format, Long> parseCsdBuffer(
-      CsdBuffer csdBuffer, String formatId, String containerMimeType) {
+      CsdBuffer csdBuffer, String formatId, String containerMimeType, String sampleMimeType) {
     byte[] csdData = Arrays.copyOf(csdBuffer.data, csdBuffer.length);
 
     int firstByte = csdData[4] & 0xFF;
@@ -266,29 +277,34 @@ public final class H262Reader implements ElementaryStreamReader {
         break;
     }
 
+    float frameRate = Format.NO_VALUE;
+    long frameDurationUs = 0;
+    int frameRateCodeMinusOne = (csdData[7] & 0x0F) - 1;
+    if (0 <= frameRateCodeMinusOne && frameRateCodeMinusOne < FRAME_RATE_VALUES.length) {
+      double frameRateValue = FRAME_RATE_VALUES[frameRateCodeMinusOne];
+      int sequenceExtensionPosition = csdBuffer.sequenceExtensionPosition;
+      if (sequenceExtensionPosition != 0 && MimeTypes.VIDEO_MPEG2.equals(sampleMimeType)) {
+        int frameRateExtensionN = (csdData[sequenceExtensionPosition + 9] & 0x60) >> 5;
+        int frameRateExtensionD = (csdData[sequenceExtensionPosition + 9] & 0x1F);
+        if (frameRateExtensionN != frameRateExtensionD) {
+          frameRateValue *= (frameRateExtensionN + 1d) / (frameRateExtensionD + 1);
+        }
+      }
+      frameRate = (float) frameRateValue;
+      frameDurationUs = (long) (C.MICROS_PER_SECOND / frameRateValue);
+    }
+
     Format format =
         new Format.Builder()
             .setId(formatId)
             .setContainerMimeType(containerMimeType)
-            .setSampleMimeType(MimeTypes.VIDEO_MPEG2)
+            .setSampleMimeType(sampleMimeType)
             .setWidth(width)
             .setHeight(height)
+            .setFrameRate(frameRate)
             .setPixelWidthHeightRatio(pixelWidthHeightRatio)
             .setInitializationData(Collections.singletonList(csdData))
             .build();
-
-    long frameDurationUs = 0;
-    int frameRateCodeMinusOne = (csdData[7] & 0x0F) - 1;
-    if (0 <= frameRateCodeMinusOne && frameRateCodeMinusOne < FRAME_RATE_VALUES.length) {
-      double frameRate = FRAME_RATE_VALUES[frameRateCodeMinusOne];
-      int sequenceExtensionPosition = csdBuffer.sequenceExtensionPosition;
-      int frameRateExtensionN = (csdData[sequenceExtensionPosition + 9] & 0x60) >> 5;
-      int frameRateExtensionD = (csdData[sequenceExtensionPosition + 9] & 0x1F);
-      if (frameRateExtensionN != frameRateExtensionD) {
-        frameRate *= (frameRateExtensionN + 1d) / (frameRateExtensionD + 1);
-      }
-      frameDurationUs = (long) (C.MICROS_PER_SECOND / frameRate);
-    }
 
     return Pair.create(format, frameDurationUs);
   }
